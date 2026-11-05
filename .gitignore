@@ -1,0 +1,11 @@
+runtime/
+.checks/
+__pycache__/
+*.pyc
+build/
+/dist/
+engine/
+*.blend1
+node_modules/
+.ruff_cache/
+.pytest_cache/

@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drawing Intelligence for Blender – Download for Windows</title>
+    <meta
+      name="description"
+      content="Download Drawing Intelligence for Blender, a work-in-progress 3D sketching app for Windows. Setup includes its own Blender runtime."
+    />
+    <meta name="theme-color" content="#000000" />
+    <link rel="icon" type="image/png" href="imgs/plexus-logo.png" />
+    <link rel="stylesheet" href="css/style.css" />
+    <script src="js/main.js" defer></script>
+  </head>
+  <body>
+    <!-- Institution and project identity. -->
+    <div class="topbar">
+      <ul class="topbar-group">
+        <li>Columbia University</li>
+        <li>GSAPP</li>
+      </ul>
+      <ul class="topbar-group">
+        <li>MS CDP</li>
+        <li>Varun SA</li>
+      </ul>
+    </div>
+    <header class="site-header">
+      <a class="brand" href="./">
+        <img src="imgs/plexus-logo.png" alt="" width="34" height="34" />
+        <span>Drawing Intelligence</span>
+      </a>
+      <a
+        class="header-link"
+        href="https://github.com/valleyvarun/drawing-intelligence-blender"
+      >
+        <span><span class="header-link-long">Source on </span>GitHub</span>
+        <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+          <path
+            d="M5.5 2.5 11 8l-5.5 5.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          />
+        </svg>
+      </a>
+    </header>
+
+    <div class="split">
+      <!-- Download and an actual application preview. -->
+      <section class="hero" aria-labelledby="title">
+        <div class="hero-content">
+          <p class="eyebrow">Blender edition · Work in progress</p>
+          <h1 id="title">Drawing Intelligence</h1>
+          <p class="tagline">
+            Sketch in 3D with a pen or mouse. Powered by Blender.
+          </p>
+          <a
+            class="download"
+            href="wizard/dist/Drawing-Intelligence-Blender-Setup.exe"
+            download
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path
+                d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.4"
+              />
+            </svg>
+            Download for Windows
+          </a>
+          <p class="download-note">
+            Windows 10 or 11, x64 · Blender runtime included by setup
+          </p>
+          <p class="os-note" id="os-note" hidden>
+            The installer runs on Windows only. Open this page on a Windows PC
+            to install Drawing Intelligence for Blender.
+          </p>
+        </div>
+      </section>
+
+      <main class="details" tabindex="0" aria-label="Installation details">
+        <section>
+          <h2>Install in four steps</h2>
+          <ol class="steps">
+            <li>
+              <strong>Run the installer.</strong> Download and open
+              <em>Drawing-Intelligence-Blender-Setup.exe</em>. The installer is
+              not code-signed yet; Windows may show a publisher warning. Confirm
+              that the download came from this repository before continuing.
+            </li>
+            <li>
+              <strong>Review the Blender information.</strong> Setup uses the
+              official Blender 5.2.2 LTS runtime and links to its license and
+              source code.
+            </li>
+            <li>
+              <strong>Choose a folder and install.</strong> Setup downloads
+              Blender and the drawing app, checks the Blender archive, and
+              creates shortcuts. Keep your internet connection active until it
+              finishes.
+            </li>
+            <li>
+              <strong>Start drawing.</strong> Open
+              <em>Drawing Intelligence (Blender)</em> from your desktop or Start
+              menu. Choose Paint, Pipe, or Grease Pencil and draw in the
+              viewport.
+            </li>
+          </ol>
+        </section>
+        <section>
+          <h2>What the installer does</h2>
+          <ul class="list">
+            <li>
+              Downloads
+              <a href="https://download.blender.org/release/Blender5.2/"
+                >Blender 5.2.2 LTS</a
+              >
+              for Windows x64 and verifies its SHA-256 checksum.
+            </li>
+            <li>
+              Downloads the drawing app from
+              <a
+                href="https://github.com/valleyvarun/drawing-intelligence-blender"
+                >this GitHub repository</a
+              >.
+            </li>
+            <li>
+              Installs the runtime in the app’s <code>engine</code> folder, with
+              an isolated settings profile.
+            </li>
+            <li>
+              Adds a Start menu entry, an optional desktop shortcut, and an
+              uninstaller in Windows Settings.
+            </li>
+          </ul>
+          <p>
+            The default folder is
+            <code>%LOCALAPPDATA%\Programs\Drawing-Intelligence-Blender</code>.
+            Spaces in folder names are supported. You can choose another
+            writable folder.
+          </p>
+        </section>
+        <section>
+          <h2>Requirements</h2>
+          <ul class="list">
+            <li>Windows 10 or 11, 64-bit x64</li>
+            <li>
+              A computer that meets
+              <a href="https://www.blender.org/download/requirements/"
+                >Blender’s system requirements</a
+              >, with current graphics drivers
+            </li>
+            <li>Allow about 5 GB of free disk space during installation</li>
+            <li>An internet connection during installation</li>
+          </ul>
+          <p>
+            You do not need to install Blender, Git, or build tools yourself.
+            The default installation does not require administrator rights.
+          </p>
+        </section>
+        <section>
+          <h2>Update or uninstall</h2>
+          <p>
+            <strong>To update,</strong> close the app and run setup again. It
+            downloads the latest published app, replaces its application files,
+            and preserves your projects and runtime preferences.
+          </p>
+          <p>
+            <strong>To uninstall,</strong> open Settings &gt; Apps &gt;
+            Installed apps, find <em>Drawing Intelligence (Blender)</em>, and
+            select Uninstall. The app and its private Blender engine are
+            removed. Saved projects and runtime preferences stay in place.
+          </p>
+          <p>
+            Keep your drawings in a project folder of your choice. Native
+            <code>.blend</code> files preserve the complete drawing data.
+          </p>
+        </section>
+        <footer>
+          <p>
+            Drawing Intelligence is a work-in-progress project by Varun SA (MS
+            CDP, Columbia University GSAPP), published as
+            <a href="https://github.com/valleyvarun">valleyvarun</a> on GitHub.
+            This edition uses Blender and is not affiliated with or endorsed by
+            the Blender Foundation. See
+            <a href="https://www.blender.org/about/license/"
+              >Blender’s license information</a
+            >
+            and <a href="THIRD_PARTY_NOTICES.md">third-party notices</a>.
+          </p>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>
