@@ -1,19 +1,32 @@
-param([string]$BlenderDirectory = '')
+param(
+    # Defaults to this checkout's private engine. An official runtime can also be copied and branded.
+    [Alias('BlenderDirectory')][string]$EngineDirectory = '',
+    [string]$Output = 'dist/3D-Drawing'
+)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $appRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$outputRoot = [IO.Path]::GetFullPath((Join-Path $appRoot 'dist/3D-Drawing'))
+$outputRoot = [IO.Path]::GetFullPath((Join-Path $appRoot $Output))
 if (-not $outputRoot.StartsWith($appRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Package output must stay inside blender-app.'
+    throw 'Package output must stay inside the application checkout.'
 }
 if (Test-Path -LiteralPath $outputRoot) {
-    throw 'dist/3D-Drawing already exists. Choose a new package version or remove the previous package manually.'
+    throw "$outputRoot already exists. Choose a new output folder."
 }
-if ($BlenderDirectory -and -not (Test-Path -LiteralPath (Join-Path $BlenderDirectory 'blender.exe'))) {
-    throw 'BlenderDirectory must contain blender.exe and its complete matching runtime.'
+if (-not $EngineDirectory) { $EngineDirectory = Join-Path $appRoot 'engine' }
+$engineSource = (Resolve-Path -LiteralPath $EngineDirectory).Path
+if (-not ((Test-Path -LiteralPath (Join-Path $engineSource 'Drawing Intelligence.exe')) -or
+          (Test-Path -LiteralPath (Join-Path $engineSource 'blender.exe')))) {
+    throw 'The engine folder must contain a complete Blender 5.2.2 runtime. Run scripts/setup-engine.ps1 first.'
 }
+if ($outputRoot.StartsWith($engineSource.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Package output cannot be inside the source engine.'
+}
+$startup = 'app/template/startup/bl_app_templates_system/drawing_intelligence/startup.blend'
+if (-not (Test-Path -LiteralPath (Join-Path $appRoot $startup))) { throw "Missing $startup" }
 New-Item -ItemType Directory -Path $outputRoot | Out-Null
-foreach ($name in @('app', 'assets', 'docs', 'scripts', 'tests', 'cmake', 'launch.cmd', 'run.ps1', 'README.md', 'THIRD_PARTY_NOTICES.md', 'pyproject.toml')) {
+foreach ($name in @('app', 'assets', 'docs', 'scripts', 'tests', 'cmake', 'launcher', 'wizard/icon',
+    'launch.cmd', 'run.ps1', 'README.md', 'THIRD_PARTY_NOTICES.md', 'pyproject.toml')) {
     $sourcePath = Join-Path $appRoot $name
     if (-not (Test-Path -LiteralPath $sourcePath)) { continue }
     if (Test-Path -LiteralPath $sourcePath -PathType Container) {
@@ -27,10 +40,12 @@ foreach ($name in @('app', 'assets', 'docs', 'scripts', 'tests', 'cmake', 'launc
     }
     else { Copy-Item -LiteralPath $sourcePath -Destination $outputRoot }
 }
-if ($BlenderDirectory) {
-    $engineRoot = Join-Path $outputRoot 'engine'
-    New-Item -ItemType Directory -Path $engineRoot | Out-Null
-    Get-ChildItem -LiteralPath $BlenderDirectory -Force | Copy-Item -Destination $engineRoot -Recurse
+$engineRoot = Join-Path $outputRoot 'engine'
+New-Item -ItemType Directory -Path $engineRoot | Out-Null
+Get-ChildItem -LiteralPath $engineSource -Force | Copy-Item -Destination $engineRoot -Recurse
+Add-Type -Path (Join-Path $appRoot 'launcher/AppIdentity.cs'), (Join-Path $appRoot 'launcher/EngineBrand.cs')
+if (-not [DrawingIntelligence.EngineBrand]::IsBranded($engineRoot)) {
+    [void][DrawingIntelligence.EngineBrand]::Apply($engineRoot, (Join-Path $appRoot 'wizard/icon/app.ico'))
 }
-Write-Output "Package created: $outputRoot"
-if (-not $BlenderDirectory) { Write-Output 'This package uses an installed Blender. Pass -BlenderDirectory to bundle the engine.' }
+& (Join-Path $appRoot 'launcher/build.ps1') -Output (Join-Path $outputRoot 'Drawing Intelligence.exe')
+Write-Output "Standalone package created: $outputRoot"

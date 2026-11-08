@@ -14,18 +14,22 @@ if not exist "%CSC%" (
 )
 if not exist dist mkdir dist
 
-rem --- 1) Convert the app logo (..\imgs\plexus-logo.png) into the icon ---
+rem --- 1) Convert the app logo (..\imgs\plexus-logo-purple.png) into the icon ---
 rem Runs inside PowerShell so no throwaway tool .exe is written (antivirus quarantines those).
-powershell -NoProfile -Command "Add-Type -Path 'icon\MakeIcon.cs' -ReferencedAssemblies System.Drawing; exit [MakeIcon]::Run('..\imgs\plexus-logo.png', 'icon')" || goto :fail
+powershell -NoProfile -Command "Add-Type -Path 'icon\MakeIcon.cs' -ReferencedAssemblies System.Drawing; exit [MakeIcon]::Run('..\imgs\plexus-logo-purple.png', 'icon')" || goto :fail
+
+rem Bundle the app launcher so installed apps do not require a C# compiler.
+powershell -NoProfile -ExecutionPolicy Bypass -File "..\launcher\build.ps1" -Output "%~dp0..\build\launcher\Drawing Intelligence.exe" || goto :fail
 
 rem --- 2) Compile the wizard ---
 "%CSC%" /nologo /warnaserror+ /optimize+ /target:winexe /platform:anycpu ^
     /out:dist\Drawing-Intelligence-Blender-Setup.exe ^
     /win32icon:icon\app.ico /win32manifest:app.manifest ^
     /resource:icon\app.ico,DrawingSetup.app.ico /resource:icon\app.png,DrawingSetup.app.png ^
+    /resource:"..\build\launcher\Drawing Intelligence.exe",DrawingSetup.launcher.exe ^
     /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll ^
     /r:System.Management.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll ^
-    src\*.cs || goto :fail
+    src\*.cs ..\launcher\AppIdentity.cs ..\launcher\EngineBrand.cs || goto :fail
 
 echo Built %~dp0dist\Drawing-Intelligence-Blender-Setup.exe
 popd

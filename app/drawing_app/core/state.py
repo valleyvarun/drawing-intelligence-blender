@@ -13,7 +13,9 @@ from typing import Literal, TypeAlias, cast
 Vec3: TypeAlias = tuple[float, float, float]
 Tool: TypeAlias = Literal["select", "move", "rotate", "scale", "paint", "pipe", "grease"]
 ROOT: Path = Path(__file__).resolve().parents[3]
-CONFIG: Path = Path(os.environ.get("DRAWING_APP_CONFIG", str(ROOT / "runtime/config")))
+CONFIG: Path = (ROOT / os.environ.get("DRAWING_APP_CONFIG", "runtime/config")).resolve()
+if not CONFIG.is_relative_to(ROOT):
+    CONFIG = ROOT / "runtime/config"
 
 
 @dataclass
@@ -30,6 +32,20 @@ class Brush:
 
 def _brushes() -> dict[str, Brush]:
     return {"paint": Brush(), "pipe": Brush(), "grease": Brush()}
+
+
+@dataclass
+class Pencil:
+    """Native Grease Pencil choices; radius and strength stay on Blender's brush assets."""
+
+    tool: str = "builtin.brush"
+    brush: str = "Pencil"
+    eraser: str = "Eraser Hard"
+    material: str = "Black"
+    fill_opacity: float = 1.0
+    # Blender's defaults: strokes at the object origin, on a plane facing the view.
+    placement: str = "ORIGIN"
+    plane: str = "VIEW"
 
 
 @dataclass
@@ -53,9 +69,13 @@ class AppState:
     active_plane: str = "Ground Plane"
     active_group: str = "Default Drawing"
     brushes: dict[str, Brush] = field(default_factory=_brushes)
+    pencil: Pencil = field(default_factory=Pencil)
     status: str = ""
     left_width: int = 220
-    right_width: int = 330
+    right_width: int = 280
+    # Window position and size in Blender's coordinates (x, y, width, height); maximized by default.
+    window_geometry: tuple[int, int, int, int] | None = None
+    window_maximized: bool = True
 
     @property
     def brush(self) -> Brush:
@@ -128,14 +148,53 @@ def load_preferences() -> None:
                 setattr(_STATE, name, value)
         for name in ("left_width", "right_width"):
             value = data.get(name)
-            if isinstance(value, int):
-                setattr(_STATE, name, max(180, min(600, value)))
+            if isinstance(value, int) and not isinstance(value, bool):
+                default: int = 220 if name == "left_width" else 280
+                setattr(_STATE, name, value if 29 <= value <= 100000 else default)
         limit: object = data.get("fps_limit")
         if isinstance(limit, int) and limit in (0, 30, 60, 120):
             _STATE.fps_limit = limit
         restore_brushes(data.get("brushes"))
+        restore_pencil(data.get("pencil"))
+        restore_window(data.get("window_geometry"), data.get("window_maximized"))
     except (OSError, ValueError, TypeError):
         _STATE.status = "Saved preferences could not be read; using defaults."
+
+
+def restore_window(geometry: object, maximized: object) -> None:
+    if isinstance(maximized, bool):
+        _STATE.window_maximized = maximized
+    if not isinstance(geometry, (list, tuple)) or len(geometry) != 4:
+        return
+    values: list[int] = []
+    item: object
+    for item in geometry:
+        if not isinstance(item, int) or isinstance(item, bool) or abs(item) > 100000:
+            return
+        values.append(item)
+    if values[2] >= 240 and values[3] >= 240:
+        _STATE.window_geometry = (values[0], values[1], values[2], values[3])
+
+
+def restore_pencil(payload: object) -> None:
+    if not isinstance(payload, dict):
+        return
+    data: dict[str, object] = cast(dict[str, object], payload)
+    pencil: Pencil = _STATE.pencil
+    name: str
+    for name in ("tool", "brush", "eraser", "material"):
+        value: object = data.get(name)
+        if isinstance(value, str) and 0 < len(value) <= 64:
+            setattr(pencil, name, value)
+    opacity: object = data.get("fill_opacity")
+    if isinstance(opacity, (int, float)) and math.isfinite(opacity):
+        pencil.fill_opacity = max(0.0, min(1.0, float(opacity)))
+    choice: object = data.get("placement")
+    if choice in ("ORIGIN", "CURSOR", "SURFACE", "STROKE"):
+        pencil.placement = str(choice)
+    choice = data.get("plane")
+    if choice in ("VIEW", "AXIS_X", "AXIS_Y", "AXIS_Z", "CURSOR"):
+        pencil.plane = str(choice)
 
 
 def restore_brushes(payload: object) -> None:

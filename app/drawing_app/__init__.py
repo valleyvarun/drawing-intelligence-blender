@@ -1,15 +1,18 @@
-"""3D Drawing: a focused application running in Blender's native window and viewport."""
+"""Drawing Intelligence: a standalone drawing application built on Blender's engine and viewport."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from .core.blender import bpy
-from .core.state import get_state, load_preferences, save_preferences
+from .core.desktop import DesktopIdentity, identity
+from .core.state import AppState, get_state, load_preferences, save_preferences
 
 _REGISTERED: bool = False
 _START_ATTEMPTS: int = 0
 _WORKSPACE_STARTED: bool = False
+_REVEAL_STEP: int = 0
 
 
 def _prepare_scene() -> None:
@@ -27,12 +30,60 @@ def _prepare_scene() -> None:
     ensure_scene()
 
 
+def _application_preferences() -> None:
+    """Engine preferences for a dedicated application; nothing is written to a Blender profile."""
+    preferences: Any = bpy.context.preferences
+    preferences.view.show_splash = False
+    preferences.view.use_reduce_motion = True
+    preferences.filepaths.file_preview_type = "NONE"
+    preferences.filepaths.save_version = 1
+    preferences.inputs.use_mouse_emulate_3_button = False
+    # Keep the three-editor layout while allowing sidebar dividers to move.
+    preferences.apps.show_corner_split = False
+    preferences.apps.show_regions_visibility_toggle = False
+    preferences.apps.show_edge_resize = True
+
+
+def _reveal() -> float | None:
+    """Let the completed workspace draw, then signal the launcher that the app is ready."""
+    global _REVEAL_STEP
+    error: RuntimeError | ReferenceError | AttributeError | OSError
+    try:
+        desktop: DesktopIdentity = identity()
+        if _REVEAL_STEP == 0:
+            desktop.refresh()
+            _REVEAL_STEP = 1
+            return 0.1
+        desktop.reveal()
+    except (RuntimeError, ReferenceError, AttributeError, OSError) as error:
+        print(f"Window reveal: {error}")
+        identity().reveal()
+    _REVEAL_STEP = 2
+    return None
+
+
+def _walk_keymap() -> float | None:
+    """Blender fills the user keymaps in its first event loop pass; fly settings follow then."""
+    from .viewport import keymap
+
+    if not _REGISTERED or keymap.install_walk():
+        return None
+    return 0.2
+
+
+def _reveal_fallback() -> float | None:
+    """A startup error must not leave the launcher's splash or a hidden window behind."""
+    if _REVEAL_STEP < 2:
+        identity().reveal()
+    return None
+
+
 def _start_workspace() -> float | None:
     global _START_ATTEMPTS, _WORKSPACE_STARTED
     from .core import controller
     from .core.project import persist_scene, restore_view
     from .ui import layout, overlay
-    from .viewport import configure_viewport, install_guides
+    from .viewport import configure_viewport, install_guides, keymap
 
     if not _REGISTERED or bpy.app.background:
         return None
@@ -43,6 +94,9 @@ def _start_workspace() -> float | None:
     error: RuntimeError | AttributeError | TypeError
     try:
         layout.configure(bpy.context)
+        keymap.install()
+        if not keymap.walk_ready() and not bpy.app.timers.is_registered(_walk_keymap):
+            bpy.app.timers.register(_walk_keymap, first_interval=0.0)
         with bpy.context.temp_override(window=window, screen=window.screen):
             area: Any = layout.viewport_area(bpy.context)
             if area is None:
@@ -64,14 +118,13 @@ def _start_workspace() -> float | None:
                         bpy.ops.ed.undo_push(message="Start drawing")
                     break
         _START_ATTEMPTS = 0
-        bpy.context.preferences.view.show_splash = False
-        bpy.context.preferences.filepaths.file_preview_type = "NONE"
-        bpy.context.preferences.filepaths.save_version = 1
-        bpy.context.preferences.inputs.use_mouse_emulate_3_button = False
+        _application_preferences()
         controller.redraw()
     except (RuntimeError, AttributeError, TypeError) as error:
         print(f"Drawing workspace startup: {error}")
         get_state().status = "Workspace startup: " + str(error)
+    if _REVEAL_STEP == 0 and not bpy.app.timers.is_registered(_reveal):
+        bpy.app.timers.register(_reveal, first_interval=0.05)
     return None
 
 
@@ -119,15 +172,36 @@ def _load_post(_unused: Any) -> None:
 @bpy.app.handlers.persistent
 def _save_pre(_unused: Any) -> None:
     from .core.project import persist_scene
+    from .ui import layout
 
+    layout.capture_widths(bpy.context)
     persist_scene()
     save_preferences()
 
 
 @bpy.app.handlers.persistent
 def _exit_pre(_interactive: bool) -> None:
+    from .ui import layout
+
+    layout.capture_widths(bpy.context)
+    window: Any = bpy.context.window_manager.windows[0] if bpy.context.window_manager.windows else None
+    if window is not None and identity().is_visible():
+        state: AppState = get_state()
+        state.window_maximized = identity().is_maximized()
+        # Blender's window coordinates, as the launcher passes them back to --window-geometry.
+        # For a maximized window they only choose the monitor.
+        state.window_geometry = (int(window.x), int(window.y), int(window.width), int(window.height))
     save_preferences()
     _load_pre(None)
+    identity().uninstall()
+
+
+def _identity_tick() -> float | None:
+    """Brand windows the engine opens later, such as file browsers."""
+    if not _REGISTERED:
+        return None
+    identity().refresh()
+    return 0.5
 
 
 @bpy.app.handlers.persistent
@@ -135,8 +209,10 @@ def _history_post(_scene: Any) -> None:
     from .core.controller import redraw
     from .core.project import restore_scene
     from .tools.layers import ensure_scene
+    from .tools.pipe_fill import cancel
     from .ui import overlay
 
+    cancel()
     restore_scene()
     ensure_scene()
     overlay.invalidate_images()
@@ -150,12 +226,13 @@ def register() -> None:
     if _REGISTERED:
         return
     if bpy.app.version < (5, 2, 0):
-        raise RuntimeError("3D Drawing requires Blender 5.2 or newer.")
+        raise RuntimeError("Drawing Intelligence requires its Blender 5.2 engine or newer.")
     load_preferences()
-    bpy.context.preferences.view.show_splash = False
-    bpy.context.preferences.filepaths.file_preview_type = "NONE"
-    # Blender's asset index uses the Windows profile even in portable sessions.
-    # This drawing workspace has no asset browser, so disable that disk index.
+    if not bpy.app.background:
+        # Group the window under the application before it is first shown.
+        identity().install()
+    _application_preferences()
+    # Blender's misleading use_asset_indexing property maps to its no_asset_indexing flag.
     if hasattr(bpy.context.preferences.experimental, "use_asset_indexing"):
         bpy.context.preferences.view.show_developer_ui = True
         bpy.context.preferences.experimental.use_asset_indexing = True
@@ -172,21 +249,29 @@ def register() -> None:
     if hasattr(bpy.app.handlers, "exit_pre"):
         bpy.app.handlers.exit_pre.append(_exit_pre)
     if not bpy.app.background:
-        bpy.app.timers.register(_start_workspace, first_interval=0.2)
+        # Build the workspace now, so the engine's first frame is already the application.
+        retry: float | None = _start_workspace()
+        if retry is not None:
+            bpy.app.timers.register(_start_workspace, first_interval=retry)
+        bpy.app.timers.register(_identity_tick, first_interval=0.5, persistent=True)
+        bpy.app.timers.register(_reveal_fallback, first_interval=15.0, persistent=True)
 
 
 def unregister() -> None:
     global _REGISTERED
     from .core import controller, project
-    from .ui import overlay
-    from .viewport import remove_guides
+    from .ui import layout, overlay
+    from .viewport import keymap, remove_guides
 
     if not _REGISTERED:
         return
     _REGISTERED = False
+    layout.capture_widths(bpy.context)
     save_preferences()
-    if bpy.app.timers.is_registered(_start_workspace):
-        bpy.app.timers.unregister(_start_workspace)
+    timer: Callable[[], float | None]
+    for timer in (_start_workspace, _identity_tick, _reveal_fallback, _reveal, _walk_keymap):
+        if bpy.app.timers.is_registered(timer):
+            bpy.app.timers.unregister(timer)
     bpy.app.handlers.load_post.remove(_load_post)
     bpy.app.handlers.load_pre.remove(_load_pre)
     bpy.app.handlers.save_pre.remove(_save_pre)
@@ -197,4 +282,6 @@ def unregister() -> None:
     controller.unregister()
     overlay.uninstall()
     remove_guides()
+    keymap.uninstall()
+    identity().uninstall()
     project.unregister()

@@ -9,3 +9,5 @@ engine/
 node_modules/
 .ruff_cache/
 .pytest_cache/
+/Drawing Intelligence.exe
+/vendor/blender/

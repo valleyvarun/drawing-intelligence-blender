@@ -1,4 +1,4 @@
-"""Isolated native Workbench captures for curved paint, pipe ends, and GP feathers."""
+"""Isolated native Workbench captures for curved paint, pipe ends, and native Grease Pencil occlusion."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from typing import Any
 from drawing_app.core import controller
 from drawing_app.core.blender import Vector, bpy
 from drawing_app.core.state import ROOT, Brush, Vec3, get_state
-from drawing_app.tools import layers
-from drawing_app.tools.drawing import material, write_grease, write_mesh
+from drawing_app.tools import layers, pencil
+from drawing_app.tools.drawing import material, write_mesh
 from drawing_app.tools.geometry import PaintCache, Sample, resample
 from drawing_app.tools.surface import PaintSurface
 from drawing_app.ui import layout
@@ -31,23 +31,37 @@ def viewport() -> Any:
 
 
 def ink_object(name: str, kind: str, brush: Brush) -> Any:
-    data: Any = bpy.data.grease_pencils.new(name) if kind == "grease" else bpy.data.meshes.new(name)
+    data: Any = bpy.data.meshes.new(name)
     obj: Any = bpy.data.objects.new(name, data)
     layers.link_stroke(obj, bpy.context)
     obj["drawing_kind"] = kind
     obj["drawing_preview"] = False
     obj.show_wire = False
-    ink: Any = material(brush, kind == "grease")
-    if kind == "grease":
-        data.materials.append(ink)
-        layer: Any = data.layers.new("Ink", set_active=True)
-        layer.frames.new(1)
-    else:
-        level: int
-        for level in range(16):
-            entry: Any = ink if level == 0 else ink.copy()
-            entry.diffuse_color = (*brush.color, level / 15.0)
-            data.materials.append(entry)
+    ink: Any = material(brush)
+    level: int
+    for level in range(16):
+        entry: Any = ink if level == 0 else ink.copy()
+        entry.diffuse_color = (*brush.color, level / 15.0)
+        data.materials.append(entry)
+    return obj
+
+
+def grease_stroke(name: str, points: list[Vec3], radius: float, material_name: str) -> Any:
+    """A native Grease Pencil stroke with one of the Tool Box materials."""
+    data: Any = bpy.data.grease_pencils.new(name)
+    layer: Any = data.layers.new(pencil.LAYER, set_active=True)
+    drawing: Any = layer.frames.new(1).drawing
+    obj: Any = bpy.data.objects.new(name, data)
+    layers.link_stroke(obj, bpy.context)
+    obj["drawing_kind"] = "grease"
+    obj.active_material_index = pencil.material_slot(obj, material_name, False)
+    drawing.add_strokes([len(points)])
+    point: Any
+    position: Vec3
+    for point, position in zip(drawing.strokes[0].points, points):
+        point.position = position
+        point.radius = radius
+        point.opacity = 1.0
     return obj
 
 
@@ -122,17 +136,10 @@ def setup() -> None:
     )
     dot: Any = ink_object("Pipe dot", "pipe", brush)
     write_mesh(dot, [Sample((-0.8, -1.7, 0.4), 0.14, 1.0, 1.0)], brush, "pipe")
-    shape: str
-    for index, shape in enumerate(("square", "triangle", "circle")):
-        brush = Brush(radius=0.3, hardness=0.15, opacity=0.55, shape=shape, color=(0.3, 0.04, 0.5))
-        grease: Any = ink_object(f"Feathered {shape}", "grease", brush)
-        write_grease(grease, [Sample((0.0 + index * 0.9, -1.8, 0.3), 0.3, 0.15, 0.55)], brush, 1)
-    brush = Brush(radius=0.3, hardness=1.0, opacity=0.55, color=(0.3, 0.04, 0.5))
-    grease = ink_object("Hard circle comparison", "grease", brush)
-    write_grease(grease, [Sample((2.7, -1.8, 0.3), 0.3, 1.0, 0.55)], brush, 1)
-    brush = Brush(radius=0.3, hardness=1.0, opacity=1.0, shape="square", color=(0.02, 0.8, 0.05))
-    grease = ink_object("Occluded GP probe", "grease", brush)
-    write_grease(grease, [Sample((-2.2, -0.75, 1.0), 0.3, 1.0, 1.0, (0.0, -1.0, 0.0))], brush, 1)
+    grease_stroke(
+        "Pencil stroke", [(0.0, -1.8, 0.3), (0.9, -1.6, 0.3), (1.8, -1.8, 0.3), (2.7, -1.6, 0.3)], 0.05, "Blue"
+    )
+    grease_stroke("Occluded GP probe", [(-2.5, -0.75, 1.0), (-1.9, -0.75, 1.0)], 0.12, "Green")
     bpy.ops.object.select_all(action="DESELECT")
     area: Any = viewport()
     view: Any = area.spaces.active.region_3d

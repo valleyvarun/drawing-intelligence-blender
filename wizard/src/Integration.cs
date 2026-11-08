@@ -14,8 +14,7 @@ namespace DrawingSetup
     // ----------------------------------------------------------------------
     internal static class Integration
     {
-        // Start the launcher's console minimized behind the application.
-        private const int ShowMinimized = 7;
+        private const int ShowNormal = 1;
 
         // --- 1) INSTALL ---
         public static void Install(string root, bool desktopShortcut, InstallLog log)
@@ -36,7 +35,8 @@ namespace DrawingSetup
                 File.WriteAllBytes(uninstaller, File.ReadAllBytes(self));
             }
 
-            string target = AppInfo.LaunchScript(root);
+            string target = AppInfo.LaunchExecutable(root);
+            RemoveLegacyShortcuts(root);
             if (desktopShortcut)
             {
                 CreateShortcut(AppInfo.DesktopShortcut, target, icon);
@@ -52,6 +52,7 @@ namespace DrawingSetup
         // --- 2) REMOVE ---
         public static void Remove(string root)
         {
+            RemoveLegacyShortcuts(root);
             foreach (string shortcut in new[] { AppInfo.DesktopShortcut, AppInfo.StartMenuShortcut })
             {
                 if (File.Exists(shortcut) && ShortcutPointsInto(shortcut, root))
@@ -91,18 +92,19 @@ namespace DrawingSetup
         {
             if (IsRunning(root))
             {
-                throw new InstallException("Drawing Intelligence (Blender) is running. Close it, then try again.");
+                throw new InstallException(AppInfo.DisplayName + " is running. Close it, then try again.");
             }
         }
 
-        // Match the isolated app path in Blender's command line.
+        // Recognize both current and older app engines, scoped to this installation.
         private static bool IsRunning(string root)
         {
             string needle = root.TrimEnd('\\') + "\\";
             try
             {
                 using (ManagementObjectSearcher searcher =
-                    new ManagementObjectSearcher("SELECT CommandLine FROM Win32_Process WHERE Name = 'blender.exe'"))
+                    new ManagementObjectSearcher("SELECT ExecutablePath, CommandLine FROM Win32_Process " +
+                        "WHERE Name = 'Drawing Intelligence.exe' OR Name = 'blender.exe'"))
                 using (ManagementObjectCollection results = searcher.Get())
                 {
                     foreach (ManagementBaseObject process in results)
@@ -110,7 +112,9 @@ namespace DrawingSetup
                         using (process)
                         {
                             string commandLine = process["CommandLine"] as string;
-                            if (commandLine != null && commandLine.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
+                            string executable = process["ExecutablePath"] as string;
+                            if ((executable != null && executable.StartsWith(needle, StringComparison.OrdinalIgnoreCase)) ||
+                                (commandLine != null && commandLine.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0))
                             {
                                 return true;
                             }
@@ -130,6 +134,16 @@ namespace DrawingSetup
         // ----------------------------------------------------------------------
         // Helpers
         // ----------------------------------------------------------------------
+        private static void RemoveLegacyShortcuts(string root)
+        {
+            foreach (Environment.SpecialFolder folder in new[] {
+                Environment.SpecialFolder.DesktopDirectory, Environment.SpecialFolder.Programs })
+            {
+                string path = Path.Combine(Environment.GetFolderPath(folder), "Drawing Intelligence (Blender).lnk");
+                if (File.Exists(path) && ShortcutPointsInto(path, root)) File.Delete(path);
+            }
+        }
+
         private static void RegisterUninstall(string root, string icon, string uninstaller)
         {
             using (RegistryKey key = Registry.CurrentUser.CreateSubKey(AppInfo.UninstallKey))
@@ -158,7 +172,7 @@ namespace DrawingSetup
                 link.SetWorkingDirectory(Path.GetDirectoryName(target));
                 link.SetIconLocation(icon, 0);
                 link.SetDescription("Open " + AppInfo.DisplayName);
-                link.SetShowCmd(ShowMinimized);
+                link.SetShowCmd(ShowNormal);
                 ((IPersistFile)link).Save(path, true);
             }
             finally

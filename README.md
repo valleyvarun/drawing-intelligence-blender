@@ -1,55 +1,67 @@
-# 3D Drawing for Blender
+# Drawing Intelligence
 
 Download page: [`index.html`](index.html). Windows setup: [`wizard/dist/Drawing-Intelligence-Blender-Setup.exe`](wizard/dist/Drawing-Intelligence-Blender-Setup.exe). Build and installer details are in [`wizard/README.md`](wizard/README.md).
 
-A separate Windows drawing application using Blender's native window, Workbench viewport, grid, geometry, undo, and GPU support. The interface follows the existing drawing app: Tool Box on the left, the viewport in the center, and Clayers / Stage on the right. Blender's general editing workspaces and panels are hidden.
+A separate Windows drawing application with its own launcher, taskbar identity, startup workspace, and private Blender engine. Tool Box is on the left, the native viewport is in the center, and Clayers / Stage is on the right. The viewport uses Blender's compiled Workbench renderer directly. Grease Pencil uses Blender's Draw mode, brush assets, and stroke operators.
 
 ## Run
 
-Double-click **`launch.cmd`**. The Windows setup wizard downloads a private Blender **5.2.2 LTS** runtime into `engine/`. Engine binaries are not stored in Git. A source checkout can use `DRAWING_BLENDER` or the normal Windows Blender installation directory. This version was tested with Blender 5.2.2 LTS.
+Double-click **`launch.cmd`** or **`Drawing Intelligence.exe`**. The launcher starts only the private engine in this application's `engine/` folder. It does not find or launch a separately installed Blender. On a fresh source checkout, `launch.cmd` prepares the private **Blender 5.2.2 LTS** engine and builds the launcher once. The Windows setup wizard installs both for end users.
 
-To choose an engine explicitly:
+For development and isolated tests:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\run.ps1 -Blender 'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run.ps1
 ```
 
-All application settings and temporary files go in `runtime/` beside the application. The launcher does not install an add-on into your usual Blender profile or change the Omniverse application.
+Application settings, logs, extensions, and temporary files go in `runtime/` beside the application. Blender's native thumbnail subsystem can still use the Windows thumbnail-cache location. The launcher does not install an add-on into your usual Blender profile. The startup file already contains the three app areas, so the stock Blender workspace is not shown behind the app.
+
+Launching requires Windows to resolve the current user's profile directory. The launcher checks this before starting the engine, because the bundled Blender thumbnail code does not handle a failed profile lookup safely. Restricted sessions that cannot resolve the profile receive an error instead of starting the engine.
 
 ## Drawing and navigation
 
-- **Paint, Pipe, Grease Pencil:** select a tool, then drag in the viewport. Click the active tool again to return to the tool chooser. Pressure switches use actual tablet pressure.
+- **Paint / Pipe:** select a tool, then drag in the viewport. Selecting a tool replaces the full toolbox with that tool's icon, settings, and canvas options. Click the active tool or press Esc to return to the full toolbox.
+- **Axes spokes:** the guides keep a fixed screen size at any cursor depth or zoom. Change pen direction to turn onto another X/Y/Z axis without lifting the pen. Each turn starts at the current stroke tip; small movements are filtered to avoid accidental axis changes. The connected stroke remains one object and one undo step.
+- **Esc:** return to Select and the tool chooser. An active stroke, navigation drag, cursor placement, or text edit is cancelled first; press Esc again to deselect the tool.
+- **Drawing tools:** Drawing contains 3D Paint, 3D Pipe, and the native Draw, Fill, Polyline, Curve, Box and Circle tools. Erase contains Trim and Erase. Native tools use Blender's original icons. Draw opens Blender's brush-thumbnail shelf at the bottom of the viewport. Size, strength, pressure, stabilization, material, placement, and plane controls remain in Tool Box. `F` adjusts the native brush radius. App canvas choices override placement when enabled; otherwise Blender's Origin / View defaults apply.
+- **Pipe Fill:** click inside a curve boundary to fill its actual 3D plane. Slightly uneven strokes are fitted to a shared plane, allowing deviations up to 5% of the whole boundary's size; short connector strokes do not reduce that allowance. Open curves are closed for filling by a straight line between their endpoints; the drawn strokes stay unchanged. Only the stroke curves define the boundary; pipe thickness and mesh shape do not affect it. Curve calculations run in a separate lightweight process and reuse cached regions. Longer operations show **Fill processing ...** at the bottom; navigation remains available. Changing tools or editing the source curves discards an unfinished fill. Fill has an **Opacity** control (0–100%) for both pipe and Grease Pencil fills, with no radius control. Strongly warped curves and straight lines without an enclosed area are not filled.
+- **Pipe Trim:** drag across a pipe to remove the portion between physical junctions (or a junction and an endpoint); strokes crossing only in the view do not make junctions. Trim keeps the remaining pipe portions and their pressure widths.
+- **Selection:** the default interaction is one selection tool with no toolbox button. Click to select or left-drag a rectangle; Shift-click adds/removes items and Shift-drag adds to the selection. Grease Pencil clicks and rectangles select individual strokes, including after using Paint or Pipe. Clayers lists individual Grease Pencil strokes directly under **Strokes**, alongside paint and pipe strokes. Gizmos, `G`/`R`/`S`, Delete and Ctrl+D affect selected strokes. Esc returns to default selection.
 - **Canvas:** use the ground, create/select a drawing plane, draw on an object, or place a 3D cursor. The cursor icon starts placement; its checkbox enables/disables it. Cursor placement on the ground snaps to the grid when the ruler is enabled.
 - **Move / Rotate / Scale:** use the native gizmo or type XYZ values. Minus/plus buttons adjust values by unit-aware increments. Rotation fields use degrees.
 - **Orbit:** hold RMB to orbit, MMB to pan, and use the wheel to zoom toward the pointer. Shift + wheel changes zoom speed, which is saved for the next launch.
 - **Fly:** choose Fly in the mouse-navigation menu, hold RMB, and use WASDQE. Shift accelerates and Ctrl slows movement.
-- **Orientation:** click a positive/negative axis circle or drag the lower-left gizmo. Axis views are centered on the original world origin.
+- **Orientation:** `1`, `2`, and `3` select orthographic X, Y, and Z views; press the same key again to flip to the negative side. `0` restores perspective. These shortcuts also accept numpad keys and preserve the current view target. Click a positive/negative axis circle or drag the lower-left gizmo to navigate around the world origin.
 - **Ruler:** numbers use world coordinates. A placed, enabled cursor anchors the ruler; otherwise it follows the view on the ground within 20 metres measured in XY. Occluded portions remain faintly visible.
 - **Clayers:** create, group, ungroup, activate, hide, and lock drawing collections. Stage lists and selects objects. Double-click a name, or hover it and press F2, to rename it.
+- **Panel sizes:** drag either vertical divider beside the viewport to resize the sidebars. Dimensions save automatically after resizing and again at shutdown, in `runtime/config/drawing-preferences.json` inside the application folder. The next launch restores your widths, scaled for display DPI; panels shrink only if they cannot fit the window. View > Reset Workspace restores a 220-unit Tool Box and 280-unit Clayers / Stage panel.
 - **Files:** save native `.blend` projects or import/export USD. Native projects preserve the complete drawing data and canvas metadata. Ctrl+S/O/N, Ctrl+Z/Shift+Ctrl+Z, Ctrl+D, Delete, and F are available.
 
 The rightmost viewport control selects Light or Dark mode. The update-rate menu limits this application's navigation updates; it is not a driver-level cap on Blender's native transform-gizmo drawing.
 
 ## Package or build
 
-Create an application package using an installed engine:
+Create a portable application package using this folder's private engine:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1 -BlenderDirectory 'C:\Program Files\Blender Foundation\Blender 5.2'
+powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1
 ```
 
-Output is `dist/3D-Drawing/`; it includes the complete engine when `-BlenderDirectory` is supplied. Without that argument, the package finds an installed Blender. Engine files, checks, generated packages, and local preferences are ignored by Git.
+Output is `dist/3D-Drawing/`, including the complete engine and launcher. `-EngineDirectory` can explicitly supply another engine to copy into the package. Engine files, generated launchers/packages, checks, and local preferences are ignored by Git. The downloadable setup executable in `wizard/dist` is intentionally committed.
 
-`scripts/build-engine.ps1` and `cmake/drawing.cmake` provide an optional out-of-source Blender build using `C:\blender`. Output stays inside this folder. The matching Windows dependency bundle and Visual Studio C++ tools are required. The runnable application uses the installed engine; the optional custom engine has not been compiled here because the checkout's Windows dependency directory is empty.
+Blender's matching native source lives locally in `vendor/blender/`. Recreate it on a fresh checkout with `scripts/setup-source.ps1`; the upstream tag and exact commit are pinned in `vendor/blender-source.json`. This includes the viewport, Grease Pencil, windowing, Python API, and bundled source libraries. Git LFS files remain pointers by default; downloading them requires `-IncludeTestData` and uses one transfer at a time. The source tree is ignored by the app repository and can be prepared again from the pin.
+
+`scripts/build-engine.ps1` uses that local source and `cmake/drawing.cmake`; compilation and staging stay in `build/`, then the result is branded and installed into `engine/`. Compiling requires the matching Windows dependency bundle in `vendor/blender/lib/windows_x64` and Visual Studio C++ tools. The current runnable engine comes from the verified official binary release, with app identity changes. It has not been recompiled from the local source; the dependency bundle is not installed.
 
 ## Validate
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\validate.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\validate.ps1 -EngineTests
 powershell -ExecutionPolicy Bypass -File .\scripts\validate.ps1 -UI
 ```
 
-The first command runs Blender geometry, layers, navigation, project, and USD regressions. `-UI` also launches isolated test windows and sends native mouse/keyboard events. Reports and screenshots are written to `.checks/`; each test uses its own settings profile.
+The first command runs formatting, lint, syntax, type checks, and host-only regression tests without starting Blender. It uses locally installed checking tools and does not download dependencies. `-EngineTests` explicitly enables Blender geometry, layers, navigation, project, and USD regressions. `-UI` additionally launches isolated test windows and sends native mouse/keyboard events. Engine tests run sequentially with two CPU threads and a timeout per process. Reports and screenshots are written to `.checks/`; each engine test uses its own settings profile.
 
 Formatting/lint/type settings are in `pyproject.toml`. `scripts/static_check.py` checks syntax and generates a separate Pyright configuration using the repository editor's actual extra paths without changing VS Code settings. See [architecture](docs/architecture.md) and [validation details](docs/validation.md).
 

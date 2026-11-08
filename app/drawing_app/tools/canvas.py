@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,8 +22,9 @@ def vector_tuple(value: Any) -> Vec3:
     return float(value[0]), float(value[1]), float(value[2])
 
 
-def ray(event: Any, area: Any, region: Any) -> tuple[Any, Any]:
-    coordinate: tuple[float, float] = (float(event.mouse_x - region.x), float(event.mouse_y - region.y))
+def ray(event: Any, area: Any, region: Any, *, pointer: tuple[float, float] | None = None) -> tuple[Any, Any]:
+    pixel: tuple[float, float] = pointer if pointer is not None else (float(event.mouse_x), float(event.mouse_y))
+    coordinate: tuple[float, float] = (pixel[0] - region.x, pixel[1] - region.y)
     view: Any = area.spaces.active.region_3d
     return (
         view3d_utils.region_2d_to_origin_3d(region, view, coordinate),
@@ -110,32 +112,69 @@ def place_cursor(context: Any, event: Any, area: Any, region: Any) -> bool:
     return True
 
 
-def choose_axis(start: Vec3, event: Any, area: Any, region: Any) -> int | None:
+def axis_directions(start: Vec3, view: Any, region: Any) -> list[tuple[int, tuple[float, float]]]:
+    """Screen directions of the world axes at a visible point, independent of depth."""
+    matrix: Any = view.perspective_matrix
+    clip: Any = matrix @ Vector((*start, 1.0))
+    w: float = float(clip.w)
+    if w <= 1e-8 or not math.isfinite(w):
+        return []
+    x: float = float(clip.x) / w
+    y: float = float(clip.y) / w
+    directions: list[tuple[int, tuple[float, float]]] = []
+    axis: int
+    for axis in range(3):
+        dx: float = (float(matrix[0][axis]) - x * float(matrix[3][axis])) * float(region.width)
+        dy: float = (float(matrix[1][axis]) - y * float(matrix[3][axis])) * float(region.height)
+        length: float = math.hypot(dx, dy)
+        if length > 1e-8 and math.isfinite(length):
+            directions.append((axis, (dx / length, dy / length)))
+    return directions
+
+
+def choose_axis(
+    start: Vec3,
+    event: Any,
+    area: Any,
+    region: Any,
+    *,
+    current: int | None = None,
+    motion: tuple[float, float] | None = None,
+    minimum: float = 4.0,
+) -> int | None:
+    """Choose from recent pen motion, retaining the current axis through small or ambiguous turns."""
     view: Any = area.spaces.active.region_3d
     center: Any = view3d_utils.location_3d_to_region_2d(region, view, Vector(start))
     if center is None:
-        return None
-    delta: Any = Vector((event.mouse_x - region.x - center.x, event.mouse_y - region.y - center.y))
-    if delta.length < 4.0:
-        return None
+        return current
+    delta: Any = Vector(
+        motion if motion is not None else (event.mouse_x - region.x - center.x, event.mouse_y - region.y - center.y)
+    )
+    if delta.length < minimum:
+        return current
     best: float = -1.0
+    previous: float = -1.0
     chosen: int | None = None
     axis: int
-    for axis in range(3):
-        unit: Any = Vector((float(axis == 0), float(axis == 1), float(axis == 2)))
-        end: Any = view3d_utils.location_3d_to_region_2d(region, view, Vector(start) + unit)
-        if end is None or (end - center).length < 1e-6:
-            continue
-        score: float = abs(float(delta.normalized().dot((end - center).normalized())))
+    direction: tuple[float, float]
+    motion_direction: Any = delta.normalized()
+    for axis, direction in axis_directions(start, view, region):
+        score: float = abs(float(motion_direction.x) * direction[0] + float(motion_direction.y) * direction[1])
+        if axis == current:
+            previous = score
         if score > best:
             best, chosen = score, axis
+    if current is not None and (best < 0.85 or best < previous + 0.15):
+        return current
     return chosen
 
 
-def axis_position(start: Vec3, axis: int, event: Any, area: Any, region: Any) -> Vec3 | None:
+def axis_position(
+    start: Vec3, axis: int, event: Any, area: Any, region: Any, *, pointer: tuple[float, float] | None = None
+) -> Vec3 | None:
     origin: Any
     direction: Any
-    origin, direction = ray(event, area, region)
+    origin, direction = ray(event, area, region, pointer=pointer)
     unit: Any = Vector((float(axis == 0), float(axis == 1), float(axis == 2)))
     delta: Any = Vector(start) - origin
     dot: float = float(direction.dot(unit))

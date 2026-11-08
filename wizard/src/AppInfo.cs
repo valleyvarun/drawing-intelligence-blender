@@ -1,16 +1,17 @@
 using System;
 using System.IO;
+using DrawingIntelligence;
 
 namespace DrawingSetup
 {
     internal static class AppInfo
     {
         // Product and downloads.
-        public const string DisplayName = "Drawing Intelligence (Blender)";
-        public const string Version = "0.1.0";
+        public const string DisplayName = AppIdentity.Name;
+        public const string Version = "0.2.0";
         public const string Publisher = "valleyvarun";
         public const string FolderName = "Drawing-Intelligence-Blender";
-        public const string BlenderVersion = "5.2.2";
+        public const string BlenderVersion = AppIdentity.EngineVersion;
         public const string BlenderZipUrl =
             "https://download.blender.org/release/Blender5.2/blender-5.2.2-windows-x64.zip";
         // https://download.blender.org/release/Blender5.2/blender-5.2.2.sha256
@@ -22,7 +23,7 @@ namespace DrawingSetup
 
         // Only these entries belong to setup. Projects and runtime preferences are preserved.
         public static readonly string[] AppEntries = {
-            "app", "launch.cmd", "run.ps1", "README.md", "THIRD_PARTY_NOTICES.md"
+            "app", "launch.cmd", "run.ps1", "README.md", "THIRD_PARTY_NOTICES.md", AppIdentity.Executable
         };
         public const string MarkerFile = ".drawing-intelligence-blender-install";
         public const string UninstallerName = "uninstall.exe";
@@ -37,7 +38,7 @@ namespace DrawingSetup
             get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", FolderName); }
         }
 
-        public static string LaunchScript(string root) { return Path.Combine(root, "launch.cmd"); }
+        public static string LaunchExecutable(string root) { return Path.Combine(root, AppIdentity.Executable); }
         public static string DesktopShortcut
         {
             get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), DisplayName + ".lnk"); }

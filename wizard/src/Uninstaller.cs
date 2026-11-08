@@ -23,7 +23,7 @@ namespace DrawingSetup
             // --- 1) CONFIRM ---
             if (!FileOps.IsInstallFolder(root))
             {
-                Report(options, "No Drawing Intelligence (Blender) installation was found in " + root + ".", true);
+                Report(options, "No Drawing Intelligence installation was found in " + root + ".", true);
                 return 2;
             }
             if (!options.Silent && !options.Confirmed)
@@ -78,7 +78,7 @@ namespace DrawingSetup
                     throw;
                 }
                 Report(options, "Some files could not be removed: " + ex.Message +
-                    "\n\nClose Drawing Intelligence (Blender) and any files open from " + root + ", then uninstall again.", true);
+                    "\n\nClose Drawing Intelligence and any files open from " + root + ", then uninstall again.", true);
                 exitCode = 3;
             }
 

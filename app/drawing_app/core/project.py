@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .blender import bpy
-from .state import ROOT, get_state, restore_brushes
+from .state import ROOT, get_state, restore_brushes, restore_pencil
 
 SCENE_STATE: str = "drawing_app_state"
 
@@ -123,6 +123,7 @@ def restore_scene() -> None:
         if data.get("cursor_side") in (-1, 1):
             get_state().cursor_side = int(data["cursor_side"])
         restore_brushes(data.get("brushes"))
+        restore_pencil(data.get("pencil"))
     except (ValueError, TypeError, AttributeError):
         get_state().status = "Project drawing preferences could not be restored."
 

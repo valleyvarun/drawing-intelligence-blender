@@ -106,41 +106,44 @@ def profile(shape: str) -> list[tuple[float, float]]:
     return points
 
 
-def fill_bands(sample: Sample) -> list[tuple[float, float]]:
-    """Nested native fills reproduce a smooth feather without accumulating opacity."""
-    if sample.hardness >= 0.999:
-        return [(1.0, sample.opacity)]
-    result: list[tuple[float, float]] = []
-    previous: float = 0.0
-    band: int
-    for band in range(1, 9):
-        t: float = band / 8.0
-        target: float = t * t * (3.0 - 2.0 * t) * sample.opacity
-        alpha: float = (target - previous) / max(1e-9, 1.0 - previous)
-        radius: float = 1.0 - (1.0 - sample.hardness) * (band - 0.5) / 8.0
-        result.append((radius, alpha))
-        previous = target
-    return result
+@dataclass
+class PipeCache:
+    shape: str = ""
+    processed: int = 0
+    points: list[Vec3] = field(default_factory=list)
+    faces: list[Face] = field(default_factory=list)
+    opacity: list[float] = field(default_factory=list)
+    frames: list[tuple[Vec3, Vec3, Vec3]] = field(default_factory=list)
 
 
-def grease_softness(hardness: float) -> float:
-    """Match the paint feather's half-opacity radius to Blender's power falloff."""
-    if hardness >= 0.999:
-        return 0.0
-    return math.log(0.5) / math.log((1.0 - max(0.0, hardness)) * 0.5) * 0.1
-
-
-def pipe_mesh(samples: list[Sample], shape: str) -> tuple[list[Vec3], list[Face], list[float]]:
-    points: list[Vec3] = []
-    faces: list[Face] = []
-    opacity: list[float] = []
+def pipe_mesh(
+    samples: list[Sample], shape: str, cache: PipeCache | None = None
+) -> tuple[list[Vec3], list[Face], list[float]]:
+    """Extend the pipe body, revising only the previous endpoint's tangent."""
+    body: PipeCache = cache if cache is not None else PipeCache()
+    if body.shape != shape or len(samples) < body.processed:
+        body.points.clear()
+        body.faces.clear()
+        body.opacity.clear()
+        body.frames.clear()
+        body.processed = 0
+        body.shape = shape
+    points: list[Vec3] = body.points
+    faces: list[Face] = body.faces
+    opacity: list[float] = body.opacity
     outline: list[tuple[float, float]] = profile(shape)
     count: int = len(outline)
-    previous_right: Vec3 | None = None
-    frames: list[tuple[Vec3, Vec3, Vec3]] = []
+    start: int = max(0, body.processed - 1)
+    del points[start * count :]
+    del opacity[start * count :]
+    del faces[max(0, start - 1) * count :]
+    frames: list[tuple[Vec3, Vec3, Vec3]] = body.frames
+    del frames[start:]
+    previous_right: Vec3 | None = frames[-1][0] if frames else None
     index: int
     sample: Sample
-    for index, sample in enumerate(samples):
+    for index in range(start, len(samples)):
+        sample = samples[index]
         before: Vec3 = samples[max(0, index - 1)].position
         after: Vec3 = samples[min(len(samples) - 1, index + 1)].position
         tangent: Vec3 = unit(add(after, mul(before, -1.0)), sample.normal)
@@ -163,6 +166,9 @@ def pipe_mesh(samples: list[Sample], shape: str) -> tuple[list[Vec3], list[Face]
                 a: int = (index - 1) * count + side
                 b: int = (index - 1) * count + (side + 1) % count
                 faces.append((a, b, b + count, a + count))
+    body.processed = len(samples)
+    # End caps are transient; keep the cached body ready for the next sample.
+    points, faces, opacity = list(points), list(faces), list(opacity)
     if samples:
         if shape == "circle":
             endpoint: int
@@ -205,13 +211,15 @@ def paint_mesh(
     if not samples:
         return [], [], []
     sample: Sample
-    radii: list[float] = []
-    for sample in samples:
-        radii.append(sample.radius)
-    radii.sort()
-    result: PaintCache = (
-        cache if cache is not None else PaintCache(max(1e-6, radii[len(radii) // 2] * 0.125, radii[-1] / 32.0))
-    )
+    result: PaintCache
+    if cache is None:
+        radii: list[float] = []
+        for sample in samples:
+            radii.append(sample.radius)
+        radii.sort()
+        result = PaintCache(max(1e-6, radii[len(radii) // 2] * 0.125, radii[-1] / 32.0))
+    else:
+        result = cache
     chart: PaintChart
     for sample in samples[result.processed :]:
         chosen: PaintChart | None = None

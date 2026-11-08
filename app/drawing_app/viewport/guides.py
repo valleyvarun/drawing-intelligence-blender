@@ -10,6 +10,7 @@ from typing import Any, TypeAlias, TypedDict, cast
 
 from ..core.blender import Vector, batch_for_shader, blf, bpy, gpu, view3d_utils
 from ..core.state import Vec3, get_state
+from . import fills
 from .navigation import AXIS_COLORS, GIZMO_CENTER, AxisHandle, axis_handles
 
 Vec2: TypeAlias = tuple[float, float]
@@ -42,18 +43,42 @@ _TEXTURE: Any = None
 _IMAGE: Any = None
 _SHAPE_SHADER: Any = None
 _LAST_ERROR: str = ""
+_VIEW_DISTANCES: dict[int, float] = {}
+_CLIP_RANGES: dict[int, float] = {}
+
+
+def navigation_distance(area: Any) -> float:
+    """Walk sets orbit distance to zero; retain the view scale during that native operation."""
+    identifier: int = int(area.as_pointer())
+    distance: float = float(area.spaces.active.region_3d.view_distance)
+    if math.isfinite(distance) and distance > 0.0:
+        _VIEW_DISTANCES[identifier] = max(distance, 1e-5)
+    return _VIEW_DISTANCES.get(identifier, 12.0)
+
+
+def eye_position(view: Any) -> Any:
+    """Compute the eye without inverting a possibly stale matrix during navigation."""
+    return view.view_location + view.view_rotation @ Vector((0.0, 0.0, float(view.view_distance)))
+
+
+def ruler_extent(area: Any, step: float) -> float:
+    """Keep ruler lines and labels on the same world scale while looking around."""
+    return min(float(area.spaces.active.clip_end), max(step * 400.0, navigation_distance(area) * 100.0))
 
 
 def update_clipping(area: Any) -> None:
-    """Keep local surface depth precise while retaining the visible ground."""
+    """Keep a stable depth range: zooming must not cut away the scene."""
     if area is None or area.type != "VIEW_3D":
         return
     space: Any = area.spaces.active
     view: Any = space.region_3d
-    distance: float = max(float(view.view_distance), 1e-5)
-    eye: Any = view.view_matrix.inverted().translation
-    near: float = max(1e-6, min(0.05, distance * 0.002))
-    far: float = max(2.0, distance * 12.0, abs(float(eye.z)) * 2.0)
+    distance: float = navigation_distance(area)
+    eye: Any = eye_position(view)
+    identifier: int = int(area.as_pointer())
+    # A vanishing near plane destroys precision for paint and native depth overlays.
+    near: float = 0.01
+    far: float = max(_CLIP_RANGES.get(identifier, 1000.0), distance * 12.0, abs(float(eye.z)) * 2.0)
+    _CLIP_RANGES[identifier] = far
     if abs(float(space.clip_start) - near) > near * 1e-5:
         space.clip_start = near
     if abs(float(space.clip_end) - far) > far * 1e-5:
@@ -139,7 +164,7 @@ def _update_mesh_outlines(scene: Any, depsgraph: Any) -> None:
 def grid_spacing(context: Any, area: Any, region: Any) -> float:
     """Shared minor-grid size in Blender units, stable throughout an orbit."""
     rv3d: Any = area.spaces.active.region_3d
-    distance: float = float(rv3d.view_distance) if rv3d.is_perspective else 1.0
+    distance: float = navigation_distance(area) if rv3d.is_perspective else 1.0
     half_height: float = distance / max(abs(float(rv3d.window_matrix[1][1])), 1e-12)
     meters: float = max(float(context.scene.unit_settings.scale_length), 1e-12)
     to_display: float = meters * (1000.0 if get_state().units == "mm" else 1.0)
@@ -153,7 +178,7 @@ def ruler_origin(context: Any, area: Any, region: Any) -> Vec3:
         cursor: Any = context.scene.cursor.location
         return float(cursor.x), float(cursor.y), float(cursor.z)
     rv3d: Any = area.spaces.active.region_3d
-    camera: Any = rv3d.view_matrix.inverted().translation
+    camera: Any = eye_position(rv3d)
     direction: Any = rv3d.view_rotation @ Vector((0.0, 0.0, -1.0))
     radius: float = 20.0 / max(float(context.scene.unit_settings.scale_length), 1e-12)
     height: float = float(camera.z)
@@ -367,7 +392,7 @@ def _draw_world() -> None:
         origin: Vec3 = ruler_origin(context, area, region)
         step: float = grid_spacing(context, area, region)
         labels: list[Label] = _labels(context, area, region, origin, step)
-        extent: float = min(float(area.spaces.active.clip_end), max(step * 400.0, float(rv3d.view_distance) * 100.0))
+        extent: float = ruler_extent(area, step)
         gpu.state.blend_set("ALPHA")
         gpu.state.depth_mask_set(False)
         mode: str
@@ -475,6 +500,7 @@ def _draw_corner() -> None:
 
 def install_guides() -> None:
     global _SCENE_KEY
+    fills.install()
     scene_key: int = int(bpy.context.scene.as_pointer())
     if scene_key != _SCENE_KEY:
         # File loads replace image data while Python draw callbacks remain installed.
@@ -501,6 +527,7 @@ def install_guides() -> None:
 
 def remove_guides() -> None:
     global _LINE_SHADER, _TEXT_SHADER, _TEXTURE, _IMAGE, _SHAPE_SHADER, _SCENE_KEY
+    fills.remove()
     handler: Any
     for handler in _HANDLERS:
         try:
@@ -509,6 +536,8 @@ def remove_guides() -> None:
             pass
     _HANDLERS.clear()
     _CONFIGURED.clear()
+    _VIEW_DISTANCES.clear()
+    _CLIP_RANGES.clear()
     if _update_mesh_outlines in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_update_mesh_outlines)
     handlers: list[Any]

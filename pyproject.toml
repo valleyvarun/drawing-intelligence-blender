@@ -14,7 +14,7 @@ select = ["E4", "E7", "E9", "F", "I", "B006", "B007", "B008", "B018", "B023", "B
 
 [tool.pyright]
 extraPaths = ["app"]
-include = ["app", "tests"]
+include = ["app", "tests", "scripts"]
 exclude = ["runtime", ".checks", "build", "dist", "engine"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"

@@ -9,12 +9,12 @@ using System.Windows.Forms;
 // ----------------------------------------------------------------------
 // Assembly identity (shown in the file's Properties > Details)
 // ----------------------------------------------------------------------
-[assembly: AssemblyTitle("Drawing Intelligence (Blender) Setup")]
-[assembly: AssemblyProduct("Drawing Intelligence (Blender)")]
+[assembly: AssemblyTitle("Drawing Intelligence Setup")]
+[assembly: AssemblyProduct("Drawing Intelligence")]
 [assembly: AssemblyCompany("valleyvarun")]
 [assembly: AssemblyCopyright("valleyvarun")]
-[assembly: AssemblyVersion("0.1.0.0")]
-[assembly: AssemblyFileVersion("0.1.0.0")]
+[assembly: AssemblyVersion("0.2.0.0")]
+[assembly: AssemblyFileVersion("0.2.0.0")]
 // Opt into .NET Framework 4.8 runtime behavior (e.g. OS-chosen TLS versions).
 [assembly: TargetFramework(".NETFramework,Version=v4.8", FrameworkDisplayName = ".NET Framework 4.8")]
 

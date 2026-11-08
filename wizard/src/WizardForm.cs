@@ -124,7 +124,7 @@ namespace DrawingSetup
 
             ResumeLayout(false);
             PerformLayout();
-            ShowPage(Page.Welcome, "Drawing Intelligence — Blender Setup",
+            ShowPage(Page.Welcome, "Drawing Intelligence Setup",
                 "A work-in-progress 3D sketching app powered by Blender.");
         }
 
@@ -197,7 +197,7 @@ namespace DrawingSetup
         private TableLayoutPanel BuildWelcome()
         {
             TableLayoutPanel page = NewPage();
-            AddRow(page, Paragraph("This wizard installs Drawing Intelligence (Blender) on this PC. It will:"));
+            AddRow(page, Paragraph("This wizard installs Drawing Intelligence on this PC. It will:"));
             AddRow(page, Bullet("Download Blender " + AppInfo.BlenderVersion + " LTS from blender.org and verify its checksum."));
             AddRow(page, Bullet("Download the drawing app from github.com/valleyvarun/drawing-intelligence-blender."));
             AddRow(page, Bullet("Install a private Blender runtime and add shortcuts and an uninstall entry."));
@@ -210,7 +210,7 @@ namespace DrawingSetup
         private TableLayoutPanel BuildLicense()
         {
             TableLayoutPanel page = NewPage();
-            AddRow(page, Paragraph("Setup downloads an official, unmodified Blender runtime. " +
+            AddRow(page, Paragraph("Setup verifies the official Blender download and gives its private engine the Drawing Intelligence name and icon. " +
                 "Blender is free and open-source software; its license files stay with the engine."));
             AddRow(page, Link("Blender license information", AppInfo.LicenseUrl));
             AddRow(page, Link("Blender " + AppInfo.BlenderVersion + " source code", AppInfo.SourceUrl));
@@ -229,7 +229,7 @@ namespace DrawingSetup
         private TableLayoutPanel BuildLocation()
         {
             TableLayoutPanel page = NewPage();
-            AddRow(page, Paragraph("Install Drawing Intelligence (Blender) in this folder:"));
+            AddRow(page, Paragraph("Install Drawing Intelligence in this folder:"));
 
             // Folder box and Browse button share one row.
             TableLayoutPanel row = new TableLayoutPanel();
@@ -314,7 +314,7 @@ namespace DrawingSetup
             _result.Margin = new Padding(0, 0, 0, 14);
             AddRow(page, _result);
 
-            _launch.Text = "Open Drawing Intelligence (Blender) now";
+            _launch.Text = "Open Drawing Intelligence now";
             _launch.AutoSize = true;
             _launch.Margin = new Padding(0, 0, 0, 10);
             AddRow(page, _launch);
@@ -467,7 +467,7 @@ namespace DrawingSetup
                     ShowLicense();
                     break;
                 case Page.License:
-                    ShowPage(Page.Location, "Install location", "Choose where to put Drawing Intelligence (Blender).");
+                    ShowPage(Page.Location, "Install location", "Choose where to put Drawing Intelligence.");
                     break;
                 case Page.Location:
                     string root;
@@ -501,13 +501,13 @@ namespace DrawingSetup
 
         private void ShowWelcome()
         {
-            ShowPage(Page.Welcome, "Drawing Intelligence — Blender Setup",
+            ShowPage(Page.Welcome, "Drawing Intelligence Setup",
                 "A work-in-progress 3D sketching app powered by Blender.");
         }
 
         private void ShowLicense()
         {
-            ShowPage(Page.License, "License terms", "Drawing Intelligence (Blender) uses its own Blender runtime.");
+            ShowPage(Page.License, "License terms", "Drawing Intelligence uses its own Blender runtime.");
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -533,7 +533,7 @@ namespace DrawingSetup
         {
             using (FolderBrowserDialog dialog = new FolderBrowserDialog())
             {
-                dialog.Description = "Choose a folder for Drawing Intelligence (Blender).";
+                dialog.Description = "Choose a folder for Drawing Intelligence.";
                 dialog.ShowNewFolderButton = true;
                 string current = _folder.Text.Trim();
                 string parent = Directory.Exists(current) ? current : Path.GetDirectoryName(current);
@@ -590,7 +590,7 @@ namespace DrawingSetup
             }
             if (FileOps.IsInstallFolder(root))
             {
-                string message = "Drawing Intelligence (Blender) is already installed in " + root + ". Setup will replace it with the latest version.";
+                string message = "Drawing Intelligence is already installed in " + root + ". Setup will replace it with the latest version.";
                 if (MessageBox.Show(this, message, Text, MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK)
                 {
                     return false;
@@ -622,7 +622,7 @@ namespace DrawingSetup
             _installer.DetailChanged += delegate(string text) { Post(delegate { _detail.Text = text; }); };
 
             _installing = true;
-            ShowPage(Page.Progress, "Installing Drawing Intelligence (Blender)", "This can take a while. You can keep using your PC.");
+            ShowPage(Page.Progress, "Installing Drawing Intelligence", "This can take a while. You can keep using your PC.");
             _flushTimer.Start();
 
             // --- 2) RUN ON A WORKER THREAD ---
@@ -662,7 +662,7 @@ namespace DrawingSetup
 
         private bool ConfirmStop()
         {
-            string message = "Stop installing Drawing Intelligence (Blender)? Temporary downloads will be removed. Run setup again to retry.";
+            string message = "Stop installing Drawing Intelligence? Temporary downloads will be removed. Run setup again to retry.";
             return MessageBox.Show(this, message, Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
         }
 
@@ -677,21 +677,21 @@ namespace DrawingSetup
                 string where = _options.DesktopShortcut
                     ? "Open it from the shortcut on your desktop or from the Start menu."
                     : "Open it from the Start menu.";
-                _result.Text = "Drawing Intelligence (Blender) is installed in " + _root + ". " + where + "\n\n" +
+                _result.Text = "Drawing Intelligence is installed in " + _root + ". " + where + "\n\n" +
                     "To update to the latest version, run this setup again. " +
                     "To remove the app, go to Settings > Apps > Installed apps.";
                 ShowPage(Page.Finish, "Setup complete", AppInfo.DisplayName + " is ready.");
             }
             else if (failure is OperationCanceledException)
             {
-                _result.Text = "Drawing Intelligence (Blender) was not installed. Run setup again to retry. Your projects and preferences were preserved.";
+                _result.Text = "Drawing Intelligence was not installed. Run setup again to retry. Your projects and preferences were preserved.";
                 ShowPage(Page.Finish, "Setup cancelled", "Nothing was added to your desktop or Start menu.");
             }
             else
             {
                 _result.Text = Installer.Describe(failure) + "\n\nRun setup again to retry. " +
                     "The install log shows what happened.";
-                ShowPage(Page.Finish, "Setup did not finish", "Drawing Intelligence (Blender) could not be installed.");
+                ShowPage(Page.Finish, "Setup did not finish", "Drawing Intelligence could not be installed.");
             }
             _next.Text = succeeded ? "Finish" : "Close";
         }
@@ -700,17 +700,17 @@ namespace DrawingSetup
         {
             try
             {
-                ProcessStartInfo info = new ProcessStartInfo(AppInfo.LaunchScript(_root));
+                ProcessStartInfo info = new ProcessStartInfo(AppInfo.LaunchExecutable(_root));
                 info.WorkingDirectory = _root;
                 info.UseShellExecute = true;
-                info.WindowStyle = ProcessWindowStyle.Minimized;
+                info.WindowStyle = ProcessWindowStyle.Normal;
                 using (Process.Start(info))
                 {
                 }
             }
             catch (Win32Exception ex)
             {
-                MessageBox.Show(this, "Drawing Intelligence (Blender) could not start: " + ex.Message, Text,
+                MessageBox.Show(this, "Drawing Intelligence could not start: " + ex.Message, Text,
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }

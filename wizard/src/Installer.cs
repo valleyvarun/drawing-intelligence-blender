@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using DrawingIntelligence;
 
 namespace DrawingSetup
 {
@@ -52,13 +53,26 @@ namespace DrawingSetup
                 Begin(2, "Downloading Blender " + AppInfo.BlenderVersion + " LTS");
                 string engine = FetchAndExtract(_options.BlenderZip, temp, "engine", AppInfo.BlenderSha256);
                 RequireFile(Path.Combine(engine, "blender.exe"));
-                Directory.Move(engine, Path.Combine(payload, "engine"));
+                string icon = Path.Combine(temp, "app.ico");
+                using (Stream resource = Resources.Open("app.ico"))
+                using (FileStream file = File.Create(icon)) resource.CopyTo(file);
+                Detail("Preparing the private Drawing Intelligence engine");
+                EngineBrand.Apply(engine, icon);
+                FileOps.MovePath(engine, Path.Combine(payload, "engine"));
 
                 Begin(3, "Downloading Drawing Intelligence from GitHub");
                 string source = FetchAndExtract(_options.SourceZip, temp, "source", null);
                 RequireFile(Path.Combine(source, "app", "bootstrap.py"));
+                RequireFile(Path.Combine(source, "app", "template", "startup", "bl_app_templates_system",
+                    AppIdentity.Template, "startup.blend"));
                 foreach (string name in AppInfo.AppEntries)
                 {
+                    if (name == AppIdentity.Executable)
+                    {
+                        using (Stream resource = Resources.Open("launcher.exe"))
+                        using (FileStream file = File.Create(Path.Combine(payload, name))) resource.CopyTo(file);
+                        continue;
+                    }
                     string entry = Path.Combine(source, name);
                     if (!File.Exists(entry) && !Directory.Exists(entry)) throw new InstallException("App download is missing " + name + ".");
                     MoveEntry(entry, Path.Combine(payload, name));
@@ -126,8 +140,7 @@ namespace DrawingSetup
 
         private static void MoveEntry(string source, string target)
         {
-            if (Directory.Exists(source)) Directory.Move(source, target);
-            else File.Move(source, target);
+            FileOps.MovePath(source, target);
         }
 
         private string FetchAndExtract(string source, string temp, string name, string expectedHash)

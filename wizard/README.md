@@ -4,7 +4,7 @@
 
 ## Build
 
-Run `wizard\build.bat` from the repository root. It uses the Windows .NET Framework C# compiler, treats warnings as errors, and generates the icon from `../imgs/plexus-logo.png`. No Visual Studio or .NET SDK is needed.
+Run `wizard\build.bat` from the repository root. It uses the Windows .NET Framework C# compiler, treats warnings as errors, and generates the icon from `../imgs/plexus-logo-purple.png`. No Visual Studio or .NET SDK is needed.
 
 Commit the rebuilt executable when changing the wizard. App-only updates need only a push to `main`.
 

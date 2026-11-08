@@ -1,19 +1,21 @@
 param(
-    [string]$Source = 'C:/blender',
+    [string]$Source = '',
     [string]$Dependencies = '',
     [string]$CMake = '',
-    [int]$Jobs = 4
+    [ValidateRange(1, 64)][int]$Jobs = 2
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $appRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if (-not $Source) { $Source = Join-Path $appRoot 'vendor/blender' }
+$Source = [IO.Path]::GetFullPath($Source)
 $buildRoot = [IO.Path]::GetFullPath((Join-Path $appRoot 'build/native'))
-$installRoot = Join-Path $appRoot 'engine'
+$installRoot = Join-Path $appRoot 'build/native-install'
 if (-not $buildRoot.StartsWith($appRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Build output must stay inside blender-app.'
 }
 if (-not (Test-Path -LiteralPath (Join-Path $Source 'source/blender/draw/engines/workbench'))) {
-    throw 'Source must point to a complete Blender source checkout.'
+    throw 'Blender source is missing. Run scripts/setup-source.ps1 to prepare vendor/blender first.'
 }
 if (-not $Dependencies) { $Dependencies = Join-Path $Source 'lib/windows_x64' }
 if (-not (Test-Path -LiteralPath (Join-Path $Dependencies 'python'))) {
@@ -29,4 +31,6 @@ if (-not (Test-Path -LiteralPath $CMake)) { throw 'CMake and Visual Studio C++ b
 if ($LASTEXITCODE -ne 0) { throw 'Engine configuration failed.' }
 & $CMake --build $buildRoot --config Release --target INSTALL --parallel $Jobs
 if ($LASTEXITCODE -ne 0) { throw 'Engine build failed.' }
-Write-Output "Native engine installed inside $installRoot"
+& (Join-Path $PSScriptRoot 'setup-engine.ps1') -From $installRoot -Force
+if (-not $?) { throw 'Native engine preparation failed.' }
+Write-Output "Native engine installed inside $(Join-Path $appRoot 'engine')"

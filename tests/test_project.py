@@ -42,16 +42,26 @@ def main() -> None:
         get_state().cursor_placed = True
         bpy.context.scene.cursor.location = (2.0, 3.0, 4.0)
         get_state().brushes["paint"].opacity = 0.37
+        get_state().pencil.brush = "Ink Pen"
+        get_state().pencil.placement = "SURFACE"
+        get_state().pencil.plane = "AXIS_Z"
         bpy.context.scene.unit_settings.scale_length = 0.01
         persist_scene()
         project_path: Path = checks / "round-trip.blend"
         bpy.ops.wm.save_as_mainfile(filepath=str(project_path))
         get_state().cursor_placed = False
         get_state().brushes["paint"].opacity = 1.0
+        get_state().pencil.brush = "Pencil"
+        get_state().pencil.placement = "ORIGIN"
+        get_state().pencil.plane = "VIEW"
         bpy.ops.wm.open_mainfile(filepath=str(project_path), load_ui=False)
         restore_scene()
         assert get_state().cursor_placed
         assert abs(get_state().brushes["paint"].opacity - 0.37) < 1e-8
+        assert get_state().pencil.brush == "Ink Pen"
+        assert get_state().pencil.placement == "SURFACE"
+        assert get_state().pencil.plane == "AXIS_Z"
+        report["native_pencil_project_settings_round_trip"] = True
         assert tuple(bpy.context.scene.cursor.location) == (2.0, 3.0, 4.0)
         assert bpy.data.collections.get("Project Group") is not None
         assert abs(layers.selected_plane().location.z - 1.4) < 1e-6

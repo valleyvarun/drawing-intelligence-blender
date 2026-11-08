@@ -1,4 +1,8 @@
-"""Mouse and trackpad navigation in the native Blender 3D View."""
+"""Viewport navigation: Blender's native operators plus the application's gizmo, wheel speed, and touch.
+
+Right and middle drags and Fly are Blender's own view3d.rotate, view3d.move and view3d.walk,
+bound in keymap.py. This module adds the axis gizmo, adjustable wheel zoom, and finger gestures.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,9 @@ from ..core.blender import Matrix, Quaternion, Vector, bpy, view3d_utils
 from ..core.state import get_state, save_preferences
 
 Point: TypeAlias = tuple[float, float]
-Drag: TypeAlias = Literal["", "orbit", "pan", "fly", "gizmo"]
+Drag: TypeAlias = Literal["", "gizmo"]
+# Blender's wheel step for view3d.zoom; other zoom speeds scale this step.
+WHEEL_STEP: float = 1.2
 GIZMO_CENTER: Point = (76.0, 76.0)
 GIZMO_RADIUS: float = 43.0
 AXIS_COLORS: tuple[tuple[float, float, float], ...] = (
@@ -18,6 +24,16 @@ AXIS_COLORS: tuple[tuple[float, float, float], ...] = (
     (113.0 / 255.0, 163.0 / 255.0, 118.0 / 255.0),
     (79.0 / 255.0, 125.0 / 255.0, 160.0 / 255.0),
 )
+VIEW_KEYS: dict[str, str] = {
+    "ONE": "X",
+    "TWO": "Y",
+    "THREE": "Z",
+    "ZERO": "PERSPECTIVE",
+    "NUMPAD_1": "X",
+    "NUMPAD_2": "Y",
+    "NUMPAD_3": "Z",
+    "NUMPAD_0": "PERSPECTIVE",
+}
 
 
 @dataclass(frozen=True)
@@ -76,6 +92,22 @@ def align_axis(rv3d: Any, axis: int, sign: int) -> None:
     rv3d.update()
 
 
+def set_view(rv3d: Any, name: str) -> None:
+    """Toggle an aligned axis side while preserving the current view target."""
+    if name == "PERSPECTIVE":
+        rv3d.view_perspective = "PERSP"
+        rv3d.view_rotation = Vector((8.0, -10.0, 7.0)).to_track_quat("Z", "Y")
+    elif name in ("X", "Y", "Z"):
+        axis: int = "XYZ".index(name)
+        backward: Any = rv3d.view_rotation @ Vector((0.0, 0.0, 1.0))
+        sign: int = -1 if rv3d.view_perspective == "ORTHO" and float(backward[axis]) > 0.9999 else 1
+        pivot: Any = rv3d.view_location.copy()
+        align_axis(rv3d, axis, sign)
+        rv3d.view_location = pivot
+        rv3d.view_perspective = "ORTHO"
+    rv3d.update()
+
+
 def orbit_view(rv3d: Any, dx: float, dy: float, width: float, height: float) -> None:
     if rv3d.view_perspective != "PERSP":
         rv3d.view_perspective = "PERSP"
@@ -91,17 +123,29 @@ def orbit_view(rv3d: Any, dx: float, dy: float, width: float, height: float) -> 
     rv3d.update()
 
 
-def zoom_view(region: Any, rv3d: Any, position: Point, factor: float) -> None:
+def zoom_view(region: Any, rv3d: Any, position: Point, factor: float, context: Any | None = None) -> None:
     if not math.isfinite(factor) or factor <= 0.0:
         return
     if rv3d.view_perspective == "CAMERA":
         rv3d.view_perspective = "PERSP"
     pivot: Any = rv3d.view_location.copy()
+    old_distance: float = float(rv3d.view_distance)
+    if context is not None and rv3d.view_perspective == "PERSP":
+        origin: Any = view3d_utils.region_2d_to_origin_3d(region, rv3d, position)
+        direction: Any = view3d_utils.region_2d_to_vector_3d(region, rv3d, position)
+        hit: Any = context.scene.ray_cast(context.evaluated_depsgraph_get(), origin, direction)
+        if hit[0]:
+            backward: Any = rv3d.view_rotation @ Vector((0.0, 0.0, 1.0))
+            eye: Any = pivot + backward * old_distance
+            depth: float = float((eye - hit[1]).dot(backward))
+            if math.isfinite(depth) and depth > 0.0:
+                # Rebase on the pointed surface without moving the eye.
+                old_distance = depth
+                pivot = eye - backward * depth
     anchor: Any = view3d_utils.region_2d_to_location_3d(region, rv3d, position, pivot)
     if anchor is None:
         return
-    old_distance: float = float(rv3d.view_distance)
-    distance: float = max(1e-5, min(1e9, old_distance * factor))
+    distance: float = max(0.02, min(1e9, old_distance * factor))
     actual: float = distance / max(old_distance, 1e-12)
     rv3d.view_location = anchor + (pivot - anchor) * actual
     rv3d.view_distance = distance
@@ -127,6 +171,8 @@ def frame_selected(context: Any, area: Any, region: Any) -> None:
 
 
 class NavigationController:
+    """Application navigation that Blender's keymap does not provide."""
+
     def __init__(self) -> None:
         from .touch import TouchNavigation
 
@@ -137,10 +183,6 @@ class NavigationController:
         self._press: Point = (0.0, 0.0)
         self._handle: AxisHandle | None = None
         self._moved: bool = False
-        self._keys: set[str] = set()
-        self._shift: bool = False
-        self._control: bool = False
-        self._fly_speed: float = 1.0
         self._touch: TouchNavigation = TouchNavigation()
 
     @property
@@ -155,12 +197,12 @@ class NavigationController:
 
     def cancel(self) -> None:
         self._drag = ""
-        self._keys.clear()
         self._handle = None
         self._area = None
         self._region = None
 
     def handle(self, context: Any, event: Any, area: Any, region: Any) -> bool:
+        """Return True when the event was used; native navigation events pass through."""
         kind: str = str(event.type)
         value: str = str(event.value)
         if kind == "WINDOW_DEACTIVATE" or (kind == "ESC" and self._drag):
@@ -172,24 +214,20 @@ class NavigationController:
         target_region: Any = self._region if self._drag and self._region is not None else region
         rv3d: Any = target_area.spaces.active.region_3d
         position: Point = (float(event.mouse_x - target_region.x), float(event.mouse_y - target_region.y))
-        self._shift = bool(event.shift)
-        self._control = bool(event.ctrl)
-        if self._drag == "fly" and kind in {"W", "A", "S", "D", "Q", "E"}:
-            if value == "RELEASE":
-                self._keys.discard(kind)
-            elif value == "PRESS":
-                self._keys.add(kind)
-            return True
-        if kind in {"RIGHTMOUSE", "MIDDLEMOUSE"}:
-            if value == "PRESS":
-                self._drag = "pan" if kind == "MIDDLEMOUSE" else ("fly" if get_state().navigation == "fly" else "orbit")
-                self._area, self._region = area, region
-                self._previous = self._press = position
-                self._keys.clear()
+        if kind in VIEW_KEYS and value == "PRESS" and not self._drag:
+            if not (event.ctrl or event.shift or event.alt or event.oskey):
+                if not getattr(event, "is_repeat", False):
+                    set_view(rv3d, VIEW_KEYS[kind])
+                    target_area.tag_redraw()
                 return True
-            if value == "RELEASE" and self._drag:
-                self.cancel()
-                return True
+        if kind == "RIGHTMOUSE" and value == "PRESS" and get_state().navigation == "fly":
+            from .guides import navigation_distance, update_clipping
+            from .keymap import set_walk_speed
+
+            # Cache scale before native Walk replaces orbit distance with zero.
+            set_walk_speed(navigation_distance(target_area))
+            update_clipping(target_area)
+            return False
         if kind == "LEFTMOUSE":
             if value == "PRESS" and math.dist(position, GIZMO_CENTER) < 65.0:
                 self._drag = "gizmo"
@@ -206,75 +244,35 @@ class NavigationController:
                 target_area.tag_redraw()
                 self.cancel()
                 return True
-        if kind in {"MOUSEMOVE", "INBETWEEN_MOUSEMOVE"} and self._drag:
-            dx: float = position[0] - self._previous[0]
-            dy: float = position[1] - self._previous[1]
-            if self._drag == "pan":
-                pan_view(target_region, rv3d, self._previous, position)
-            elif self._drag == "gizmo":
-                self._moved = self._moved or math.dist(position, self._press) >= 4.0
-                if self._moved:
-                    orbit_view(rv3d, dx, dy, 136.0, 136.0)
-            else:
-                eye: Any = rv3d.view_location + rv3d.view_rotation @ Vector((0.0, 0.0, rv3d.view_distance))
-                orbit_view(rv3d, dx, dy, float(target_region.width), float(target_region.height))
-                if self._drag == "fly":
-                    rv3d.view_location = eye - rv3d.view_rotation @ Vector((0.0, 0.0, rv3d.view_distance))
-                    rv3d.update()
+        if kind in {"MOUSEMOVE", "INBETWEEN_MOUSEMOVE"} and self._drag == "gizmo":
+            self._moved = self._moved or math.dist(position, self._press) >= 4.0
+            if self._moved:
+                orbit_view(rv3d, position[0] - self._previous[0], position[1] - self._previous[1], 136.0, 136.0)
             self._previous = position
             target_area.tag_redraw()
             return True
-        if kind in {"WHEELUPMOUSE", "WHEELDOWNMOUSE"} and value == "PRESS":
+        if kind in {"WHEELUPMOUSE", "WHEELDOWNMOUSE"} and value == "PRESS" and not self._drag:
             amount: float = 1.0 if kind == "WHEELUPMOUSE" else -1.0
-            if self._drag == "fly":
-                self._fly_speed = max(0.05, min(50.0, self._fly_speed * math.pow(1.25, amount)))
-                get_state().status = f"Fly speed: {self._fly_speed:.3g}x"
-            elif self._shift and get_state().navigation == "orbit":
+            if event.shift:
                 get_state().zoom_speed = max(0.1, min(10.0, get_state().zoom_speed * math.pow(1.25, amount)))
                 save_preferences()
-                get_state().status = f"Orbit zoom speed: {get_state().zoom_speed:.3g}x"
-            else:
-                zoom_view(target_region, rv3d, position, math.exp(-amount * -math.log(0.88) * get_state().zoom_speed))
+                get_state().status = f"Zoom speed: {get_state().zoom_speed:.3g}x"
+                target_area.tag_redraw()
+                return True
+            if abs(get_state().zoom_speed - 1.0) < 1e-6:
+                # Blender's view3d.zoom, toward the pointer (Zoom to Mouse Position).
+                return False
+            zoom_view(target_region, rv3d, position, math.pow(WHEEL_STEP, -amount * get_state().zoom_speed), context)
             target_area.tag_redraw()
             return True
-        if kind in {"TRACKPADPAN", "MOUSEROTATE", "TRACKPADZOOM"}:
-            delta_x: float = float(event.mouse_x - event.mouse_prev_x)
-            delta_y: float = float(event.mouse_y - event.mouse_prev_y)
-            if kind == "TRACKPADZOOM":
-                zoom_view(target_region, rv3d, position, math.exp(max(-2.0, min(2.0, -(delta_x + delta_y) * 0.01))))
-            elif self._shift:
-                pan_view(target_region, rv3d, (position[0] - delta_x, position[1] - delta_y), position)
-            else:
-                orbit_view(rv3d, delta_x, delta_y, float(target_region.width), float(target_region.height))
-            target_area.tag_redraw()
-            return True
-        if kind in {"F", "NUMPAD_PERIOD"} and value == "PRESS" and not self._drag:
+        frame: bool = kind == "NUMPAD_PERIOD" or (kind == "F" and get_state().tool != "grease")
+        if frame and value == "PRESS" and not self._drag:
             frame_selected(context, area, region)
             return True
         return False
 
     def tick(self, context: Any, dt: float) -> None:
         self._touch.tick(context)
-        if self._drag != "fly" or not self._keys or self._area is None:
-            return
-        rv3d: Any = self._area.spaces.active.region_3d
-        local: Any = Vector(
-            (
-                float("D" in self._keys) - float("A" in self._keys),
-                0.0,
-                float("S" in self._keys) - float("W" in self._keys),
-            )
-        )
-        direction: Any = rv3d.view_rotation @ local
-        direction.z += float("E" in self._keys) - float("Q" in self._keys)
-        if direction.length_squared < 1e-10:
-            return
-        speed: float = max(0.02, float(rv3d.view_distance) * 0.4)
-        speed *= self._fly_speed
-        speed *= 4.0 if self._shift else (0.25 if self._control else 1.0)
-        rv3d.view_location += direction.normalized() * speed * max(0.0, min(dt, 0.1))
-        rv3d.update()
-        self._area.tag_redraw()
 
     @staticmethod
     def frame_selected(context: Any, area: Any, region: Any) -> None:

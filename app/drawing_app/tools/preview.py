@@ -7,10 +7,10 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ..core.blender import batch_for_shader, bpy, gpu
+from ..core.blender import Matrix, Vector, batch_for_shader, bpy, gpu, view3d_utils
 from ..core.state import Vec3, get_state
 from ..viewport.navigation import AXIS_COLORS
-from .canvas import Hit
+from .canvas import Hit, axis_directions
 from .geometry import add, basis, mul, profile
 
 
@@ -70,7 +70,7 @@ class BrushPreview:
     def _draw(self) -> None:
         if bpy.context.area != self._area or bpy.context.region != self._region:
             return
-        if get_state().tool not in ("paint", "pipe", "grease") and not get_state().cursor_placing:
+        if get_state().tool not in ("paint", "pipe") and not get_state().cursor_placing:
             return
         depth: str = str(gpu.state.depth_test_get())
         mask: bool = bool(gpu.state.depth_mask_get())
@@ -117,14 +117,7 @@ class BrushPreview:
                 1.0,
             )
             if get_state().axes_spokes:
-                axis: int
-                for axis in range(3):
-                    vector: Vec3 = (float(axis == 0), float(axis == 1), float(axis == 2))
-                    self._line(
-                        [add(center, mul(vector, -self._radius * 4.0)), add(center, mul(vector, self._radius * 4.0))],
-                        (*AXIS_COLORS[axis], 0.9),
-                        1.2,
-                    )
+                self._draw_spokes(self._hit.position)
         except (RuntimeError, TypeError, ValueError, AttributeError) as error:
             if str(error) != self._last_error:
                 self._last_error = str(error)
@@ -133,6 +126,27 @@ class BrushPreview:
             gpu.state.depth_test_set(depth)
             gpu.state.depth_mask_set(mask)
             gpu.state.blend_set(blend)
+
+    def _draw_spokes(self, position: Vec3) -> None:
+        """Draw fixed screen lengths while retaining the projected world-axis directions."""
+        view: Any = self._area.spaces.active.region_3d
+        center: Any = view3d_utils.location_3d_to_region_2d(self._region, view, Vector(position))
+        if center is None or self._region.width <= 0 or self._region.height <= 0:
+            return
+        scale: float = max(1.0, float(bpy.context.preferences.system.ui_scale))
+        radius: float = 32.0 * scale
+        x: float = 2.0 * float(center.x) / self._region.width - 1.0
+        y: float = 2.0 * float(center.y) / self._region.height - 1.0
+        gpu.state.depth_test_set("NONE")
+        with gpu.matrix.push_pop(), gpu.matrix.push_pop_projection():
+            gpu.matrix.load_identity()
+            gpu.matrix.load_projection_matrix(Matrix.Identity(4))
+            axis: int
+            direction: tuple[float, float]
+            for axis, direction in axis_directions(position, view, self._region):
+                dx: float = direction[0] * radius * 2.0 / self._region.width
+                dy: float = direction[1] * radius * 2.0 / self._region.height
+                self._line([(x - dx, y - dy, 0.0), (x + dx, y + dy, 0.0)], (*AXIS_COLORS[axis], 0.9), 1.2)
 
     def _draw_recognition(self) -> None:
         if not self._recognized or time.monotonic() >= self._expires:

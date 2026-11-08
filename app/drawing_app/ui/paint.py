@@ -17,6 +17,24 @@ FIELD: Color = (0.125, 0.135, 0.14, 1.0)
 BUTTON: Color = (0.16, 0.16, 0.16, 1.0)
 SELECTED: Color = (0.16, 0.37, 0.55, 1.0)
 _SHADER: Any = None
+_ICON_SHADER: Any = None
+_ICON_BATCHES: dict[str, Any] = {}
+_BLENDER_ICONS: dict[str, str] = {
+    "move": "ops.transform.translate.dat",
+    "rotate": "ops.transform.rotate.dat",
+    "scale": "ops.transform.resize.dat",
+    "grease": "ops.gpencil.draw.dat",
+    "builtin_brush.Erase": "brush.gpencil_draw.erase.dat",
+    "builtin_brush.Fill": "brush.gpencil_draw.fill.dat",
+    "builtin.trim": "ops.gpencil.stroke_trim.dat",
+    "builtin.line": "ops.gpencil.primitive_line.dat",
+    "builtin.polyline": "ops.gpencil.primitive_polyline.dat",
+    "builtin.arc": "ops.gpencil.primitive_arc.dat",
+    "builtin.curve": "ops.gpencil.primitive_curve.dat",
+    "builtin.box": "ops.gpencil.primitive_box.dat",
+    "builtin.circle": "ops.gpencil.primitive_circle.dat",
+    "builtin.eyedropper": "ops.paint.eyedropper_add.dat",
+}
 _IMAGES: dict[str, Any] = {}
 _FONT: int = -1
 _FONT_PATH: str = ""
@@ -125,12 +143,15 @@ def text(label: str, x: float, y: float, size: float = 13.0, color: Color = TEXT
         value += "..."
     blf.position(font, x * _TEXT_SCALE, y * _TEXT_SCALE, 0)
     blf.color(font, *color)
+    blend: str = gpu.state.blend_get()
     gpu.matrix.push()
     try:
         gpu.matrix.scale((1.0 / _TEXT_SCALE, 1.0 / _TEXT_SCALE, 1.0))
         blf.draw(font, value)
     finally:
         gpu.matrix.pop()
+        # BLF disables blending when it finishes drawing text.
+        gpu.state.blend_set(blend)
 
 
 def image(name: str, x: float, y: float, size: float) -> bool:
@@ -158,8 +179,52 @@ def image(name: str, x: float, y: float, size: float) -> bool:
     )
     shader.bind()
     shader.uniform_sampler("image", texture)
-    batch.draw(shader)
+    blend: str = gpu.state.blend_get()
+    gpu.state.blend_set("ALPHA_PREMULT" if _IMAGES[name].alpha_mode == "PREMUL" else "ALPHA")
+    try:
+        batch.draw(shader)
+    finally:
+        gpu.state.blend_set(blend)
     return True
+
+
+def load_icon_geometry(path: Path) -> tuple[list[Point], list[Color]]:
+    """Read Blender's VCO triangle format, preserving its coordinates and vertex colors."""
+    data: bytes = path.read_bytes()
+    if len(data) <= 8 or data[:4] != b"VCO\x00" or (len(data) - 8) % 18:
+        raise ValueError(f"Invalid Blender toolbar icon: {path.name}")
+    count: int = (len(data) - 8) // 6
+    color_start: int = 8 + count * 2
+    vertices: list[Point] = []
+    colors: list[Color] = []
+    index: int
+    for index in range(count):
+        position: int = 8 + index * 2
+        color: int = color_start + index * 4
+        vertices.append((float(data[position]), float(data[position + 1])))
+        colors.append((data[color] / 255.0, data[color + 1] / 255.0, data[color + 2] / 255.0, data[color + 3] / 255.0))
+    return vertices, colors
+
+
+def _blender_icon(name: str, x: float, y: float, size: float) -> None:
+    global _ICON_SHADER
+    if _ICON_SHADER is None:
+        _ICON_SHADER = gpu.shader.from_builtin("SMOOTH_COLOR")
+    if name not in _ICON_BATCHES:
+        path: Path = Path(__file__).resolve().parents[1] / "assets/blender" / _BLENDER_ICONS[name]
+        vertices: list[Point]
+        colors: list[Color]
+        vertices, colors = load_icon_geometry(path)
+        _ICON_BATCHES[name] = batch_for_shader(_ICON_SHADER, "TRIS", {"pos": vertices, "color": colors})
+    gpu.matrix.push()
+    try:
+        gpu.matrix.translate((x, y, 0.0))
+        # Blender rasterizes these byte coordinates on a 256-unit canvas.
+        gpu.matrix.scale((size / 256.0, size / 256.0, 1.0))
+        _ICON_SHADER.bind()
+        _ICON_BATCHES[name].draw(_ICON_SHADER)
+    finally:
+        gpu.matrix.pop()
 
 
 def icon(name: str, x: float, y: float, size: float, color: Color = TEXT) -> None:
@@ -170,20 +235,8 @@ def icon(name: str, x: float, y: float, size: float, color: Color = TEXT) -> Non
         {"paint": "brush_oval.png", "pipe": "brush_sphere.png", "plane": "drawing_plane.png"}[name], x, y, size
     ):
         return
-    if name == "move":
-        line([(cx - r, cy), (cx + r, cy)], color)
-        line([(cx, cy - r), (cx, cy + r)], color)
-        line([(cx - r * 0.6, cy + r * 0.6), (cx, cy + r), (cx + r * 0.6, cy + r * 0.6)], color)
-        line([(cx - r * 0.6, cy - r * 0.6), (cx, cy - r), (cx + r * 0.6, cy - r * 0.6)], color)
-        line([(cx - r * 0.6, cy - r * 0.6), (cx - r, cy), (cx - r * 0.6, cy + r * 0.6)], color)
-        line([(cx + r * 0.6, cy - r * 0.6), (cx + r, cy), (cx + r * 0.6, cy + r * 0.6)], color)
-    elif name == "rotate":
-        circle(cx, cy, r, color)
-        line([(cx + r, cy + r), (cx + r, cy), (cx, cy)], color, 2)
-    elif name == "scale":
-        line([(cx - r, cy - r), (cx + r, cy + r)], color)
-        line([(cx - r, cy), (cx - r, cy - r), (cx, cy - r)], color)
-        line([(cx, cy + r), (cx + r, cy + r), (cx + r, cy)], color)
+    if name in _BLENDER_ICONS:
+        _blender_icon(name, x, y, size)
     elif name in ("cursor", "cursor_active"):
         circle(cx, cy, r * 0.75, color)
         line([(cx - r * 1.3, cy), (cx + r * 1.3, cy)], (0.75, 0.35, 0.35, 1))
@@ -237,7 +290,7 @@ def icon(name: str, x: float, y: float, size: float, color: Color = TEXT) -> Non
         line([(cx, cy), (cx, cy - r)], color)
     else:
         text(
-            {"grease": "GP", "group": "+", "ungroup": "-", "pressure": "P", "add": "+"}.get(name, name[:1].upper()),
+            {"group": "+", "ungroup": "-", "pressure": "P", "add": "+"}.get(name, name[:1].upper()),
             x + size * 0.25,
             y + size * 0.25,
             size * 0.48,
@@ -250,8 +303,10 @@ def invalidate_images() -> None:
 
 
 def release() -> None:
-    global _SHADER, _FONT, _FONT_PATH
+    global _SHADER, _ICON_SHADER, _FONT, _FONT_PATH
     _SHADER = None
+    _ICON_SHADER = None
+    _ICON_BATCHES.clear()
     _IMAGES.clear()
     if _FONT_PATH:
         blf.unload(_FONT_PATH)

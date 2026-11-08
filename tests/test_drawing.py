@@ -1,4 +1,4 @@
-"""Isolated Blender runtime checks for geometry, layers, pressure, and cancellation."""
+"""Isolated engine checks for geometry, layers, pressure, cancellation, and native Grease Pencil."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ from typing import Any
 
 import drawing_app.viewport as viewport
 from drawing_app.core.blender import Vector, bpy
-from drawing_app.core.state import Tool, get_state
-from drawing_app.tools import canvas, layers
+from drawing_app.core.state import Pencil, Tool, get_state
+from drawing_app.tools import canvas, layers, pencil
 from drawing_app.tools.canvas import Hit
 from drawing_app.tools.drawing import DrawingController, write_mesh
-from drawing_app.tools.geometry import PaintCache, Sample, fill_bands, grease_softness, paint_mesh, pipe_mesh, resample
+from drawing_app.tools.geometry import PaintCache, Sample, paint_mesh, pipe_mesh, resample
 from drawing_app.tools.surface import PaintSurface
 
 report: dict[str, Any] = {}
@@ -59,7 +59,7 @@ controller: DrawingController = DrawingController()
 event: Any = SimpleNamespace(type="LEFTMOUSE", value="PRESS", pressure=0.5, is_tablet=True, mouse_x=100, mouse_y=100)
 kind: Tool
 shape: str
-for kind in ("pipe", "paint", "grease"):
+for kind in ("pipe", "paint"):
     for shape in ("circle", "square", "triangle"):
         get_state().tool = kind
         get_state().brush.shape = shape
@@ -71,20 +71,17 @@ for kind in ("pipe", "paint", "grease"):
         assert controller.is_drawing and controller._samples[0].radius == 0.02
         finish: Sample = Sample((0.16, 0.03, 0.0), 0.035, 0.5, 0.6)
         controller._samples.extend(resample(controller._samples[-1], finish))
+        obj: Any = controller._object
         controller._finish(context)
-        obj: Any = context.view_layer.objects.active
+        assert not obj.select_get()
         assert obj.get("drawing_kind") == kind and not obj.get("drawing_preview")
         assert len(obj.get("drawing_samples")) > 9
-        if kind == "grease":
-            assert obj.type == "GREASEPENCIL"
-            assert len(obj.data.layers[0].frames[0].drawing.strokes) >= 1
-        else:
-            assert len(obj.data.vertices) > 3 and len(obj.data.polygons) > 0
-            values: list[float] = []
-            item: Any
-            for item in obj.data.color_attributes["Ink"].data:
-                values.append(float(item.color[3]))
-            assert min(values) >= 0.0 and max(values) <= 0.70001
+        assert len(obj.data.vertices) > 3 and len(obj.data.polygons) > 0
+        values: list[float] = []
+        item: Any
+        for item in obj.data.color_attributes["Ink"].data:
+            values.append(float(item.color[3]))
+        assert min(values) >= 0.0 and max(values) <= 0.70001
         report[f"{kind}_{shape}"] = True
 count: int = len(bpy.data.objects)
 assert controller.begin(context, event, area, region)
@@ -148,17 +145,6 @@ cap_points, cap_faces, cap_alpha = pipe_mesh([Sample((0.0, 0.0, 0.0), 0.1, 1.0, 
 for point in cap_points:
     assert math.isclose(math.sqrt(point[0] ** 2 + point[1] ** 2 + point[2] ** 2), 0.1)
 report["round_pipe_closed_domes_and_single_click_sphere"] = True
-transmission: float = 1.0
-_radius: float
-alpha: float
-for _radius, alpha in fill_bands(Sample((0.0, 0.0, 0.0), 0.1, 0.3, 0.6)):
-    transmission *= 1.0 - alpha
-assert math.isclose(1.0 - transmission, 0.6)
-report["grease_feather_bands_preserve_opacity"] = True
-softness: float = grease_softness(0.15)
-half_radius: float = 1.0 - math.pow(0.5, 1.0 / (10.0 * softness))
-assert math.isclose(half_radius, 0.575) and grease_softness(1.0) == 0.0
-report["grease_circle_softness_preserves_brush_footprint"] = True
 long_samples: list[Sample] = []
 index: int
 for index in range(500):
@@ -174,8 +160,8 @@ full_vertices: dict[tuple[float, float, float], float] = dict(zip(full_geometry[
 assert cached_vertices == full_vertices and len(cached_geometry[1]) == len(full_geometry[1])
 report["incremental_paint_matches_full_union"] = True
 assert controller.begin(context, event, area, region)
+undo_name: str = controller._object.name
 controller._finish(context)
-undo_name: str = context.view_layer.objects.active.name
 if bpy.ops.ed.undo.poll():
     bpy.ops.ed.undo()
     assert bpy.data.objects.get(undo_name) is None
@@ -306,6 +292,156 @@ assert context.scene.cursor.location[2] == 0.0
 report["cursor_ground_snap_on_object_miss"] = True
 viewport.grid_spacing = original_spacing
 canvas.ray = original_ray
+
+# Native Grease Pencil: Blender's Draw mode, brush assets, tools, materials, and placement.
+get_state().cursor_active = get_state().cursor_placed = get_state().cursor_placing = False
+get_state().on_object = get_state().drawing_plane = False
+get_state().pencil = Pencil()
+get_state().tool = "grease"
+settings: Any = context.scene.tool_settings
+with context.temp_override(area=area, region=region):
+    assert pencil.enter(context)
+    gp_object: Any = context.view_layer.objects.active
+    assert pencil.is_pencil(gp_object) and gp_object.mode == pencil.MODE and pencil.active(context)
+    assert gp_object.name in layers.active_collection(context, strokes=True).objects
+    assert gp_object.data.layers.active.name == pencil.LAYER
+    assert pencil.active_tool(context) == "builtin.brush"
+    assert settings.gpencil_paint.brush.name == "Pencil" and settings.gpencil_paint.color_mode == "MATERIAL"
+    assert (settings.gpencil_stroke_placement_view3d, settings.gpencil_sculpt.lock_axis) == ("ORIGIN", "VIEW")
+    assert gp_object.active_material.get(pencil.MARKER) == "Black"
+    assert gp_object.active_material.grease_pencil.is_stroke_visible
+    assert not gp_object.active_material.grease_pencil.is_fill_visible
+    assert context.space_data.show_region_asset_shelf
+    report["native_grease_pencil_draw_mode_defaults"] = True
+    pencil.command(context, "brush", "Ink Pen")
+    assert settings.gpencil_paint.brush.name == "Ink Pen"
+    pencil.command(context, "tool", "builtin_brush.Erase")
+    assert pencil.active_tool(context) == "builtin_brush.Erase"
+    assert settings.gpencil_paint.brush.name == "Eraser Hard"
+    pencil.command(context, "material", "Red")
+    pencil.command(context, "tool", "builtin_brush.Fill")
+    fill: Any = gp_object.active_material
+    assert fill.get(pencil.MARKER) == "Red Fill" and fill.grease_pencil.is_fill_visible
+    assert not fill.grease_pencil.is_stroke_visible
+    pencil.command(context, "tool", "builtin.brush")
+    assert settings.gpencil_paint.brush.name == "Ink Pen" and gp_object.active_material.get(pencil.MARKER) == "Red"
+    report["native_tools_brush_assets_and_materials"] = True
+    gp_brush: Any = settings.gpencil_paint.brush
+    pencil.command(context, "strength", 0.4)
+    pencil.command(context, "hardness", 0.25)
+    pencil.command(context, "pressure_strength", False)
+    pencil.command(context, "stabilize", True)
+    pencil.command(context, "size", 0.2 if gp_brush.use_locked_size == "SCENE" else 30.0)
+    assert math.isclose(gp_brush.strength, 0.4, abs_tol=1e-6) and not gp_brush.use_pressure_strength
+    assert math.isclose(gp_brush.gpencil_settings.hardness, 0.25, abs_tol=1e-6) and gp_brush.use_smooth_stroke
+    if gp_brush.use_locked_size == "SCENE":
+        assert math.isclose(gp_brush.unprojected_size, 0.2, abs_tol=1e-6)
+    else:
+        assert gp_brush.size == 30
+    gp_view: pencil.PencilView | None = pencil.view(context)
+    assert gp_view is not None and gp_view.brush == "Ink Pen" and gp_view.material == "Red"
+    report["native_brush_settings_and_tool_box_view"] = True
+    get_state().cursor_active = get_state().cursor_placed = True
+    get_state().cursor_axis = 0
+    pencil.refresh(context)
+    assert (settings.gpencil_stroke_placement_view3d, settings.gpencil_sculpt.lock_axis) == ("CURSOR", "AXIS_X")
+    get_state().cursor_active = get_state().cursor_placed = False
+    get_state().on_object = True
+    pencil.refresh(context)
+    assert (settings.gpencil_stroke_placement_view3d, settings.gpencil_sculpt.lock_axis) == ("SURFACE", "VIEW")
+    get_state().on_object = False
+    pencil.command(context, "placement", "STROKE")
+    pencil.command(context, "plane", "AXIS_Y")
+    assert (settings.gpencil_stroke_placement_view3d, settings.gpencil_sculpt.lock_axis) == ("STROKE", "AXIS_Y")
+    pencil.command(context, "placement", "ORIGIN")
+    drawing_plane: Any = layers.create_plane(context)
+    drawing_plane.location = (1.0, 2.0, 3.0)
+    drawing_plane.rotation_euler = (0.3, 0.0, 0.2)
+    context.view_layer.update()
+    pencil.refresh(context)
+    plane_layer: Any = gp_object.data.layers.active
+    assert plane_layer.parent == drawing_plane and context.view_layer.objects.active == gp_object
+    assert (Vector(plane_layer.translation) - drawing_plane.matrix_world.translation).length < 1e-6
+    assert (settings.gpencil_stroke_placement_view3d, settings.gpencil_sculpt.lock_axis) == ("ORIGIN", "AXIS_Z")
+    get_state().drawing_plane = False
+    pencil.refresh(context)
+    assert gp_object.data.layers.active.name == pencil.LAYER
+    report["canvas_options_choose_native_placement_and_plane_layers"] = True
+    locked_group: str = "collection:" + get_state().active_group
+    layers.set_locked(context, locked_group, True)
+    assert not pencil.enter(context) and gp_object.mode == "OBJECT"
+    layers.set_locked(context, locked_group, False)
+    assert pencil.enter(context)
+    pencil.leave(context)
+    assert gp_object.mode == "OBJECT"
+    report["locked_group_blocks_draw_mode"] = True
+    duplicate: Any = gp_object.copy()
+    duplicate.data = gp_object.data.copy()
+    layers.link_stroke(duplicate, context)
+    gp_object.select_set(False)
+    duplicate.select_set(True)
+    context.view_layer.objects.active = duplicate
+    assert pencil.enter(context) and context.view_layer.objects.active == duplicate
+    pencil.leave(context)
+    assert gp_object.mode == duplicate.mode == "OBJECT"
+    report["selected_grease_pencil_duplicate_remains_editable"] = True
+    sampled_material: Any = bpy.data.materials.new("Sampled ink")
+    bpy.data.materials.create_gpencil_data(sampled_material)
+    sampled_material.grease_pencil.color = (0.2, 0.3, 0.4, 1.0)
+    duplicate.data.materials.append(sampled_material)
+    duplicate.active_material_index = len(duplicate.material_slots) - 1
+    pencil.command(context, "tool", "builtin.brush")
+    assert duplicate.active_material == sampled_material
+    pencil.command(context, "plane", "AXIS_Z")
+    assert duplicate.active_material == sampled_material
+    gp_view = pencil.view(context)
+    assert gp_view is not None and gp_view.material == sampled_material.name
+    pencil.command(context, "material", "Blue")
+    assert duplicate.active_material.get(pencil.MARKER) == "Blue"
+    pencil.leave(context)
+    report["sampled_native_material_survives_tool_and_canvas_changes"] = True
+with context.temp_override(area=area, region=region):
+    selection_data: Any = bpy.data.grease_pencils.new("Stroke Selection Probe")
+    selection_layer: Any = selection_data.layers.new("Strokes", set_active=True)
+    selection_drawing: Any = selection_layer.frames.new(int(context.scene.frame_current)).drawing
+    selection_drawing.add_strokes([3, 3, 3])
+    stroke_index: int
+    native_stroke: Any
+    for stroke_index, native_stroke in enumerate(selection_drawing.strokes):
+        point_index: int
+        native_point: Any
+        for point_index, native_point in enumerate(native_stroke.points):
+            native_point.position = (float(point_index), float(stroke_index), 0.0)
+    selection_object: Any = bpy.data.objects.new("Stroke Selection Probe", selection_data)
+    layers.link_stroke(selection_object, context)
+    context.view_layer.objects.active = selection_object
+    selection_object.select_set(True)
+    get_state().tool = "select"
+    assert pencil.enter_selection(context)
+    assert settings.gpencil_selectmode_edit == "STROKE"
+    assert not any(native_stroke.select for native_stroke in selection_drawing.strokes)
+    stroke_rows: list[layers.LayerRow] = [
+        row for row in layers.layer_rows(context) if row.key.startswith(f"stroke:{selection_object.name}:")
+    ]
+    assert [row.name for row in stroke_rows] == ["Stroke 1", "Stroke 2", "Stroke 3"]
+    pencil.leave(context)
+    assert pencil.select_row(context, stroke_rows[0].key)
+    assert [native_stroke.select for native_stroke in selection_drawing.strokes] == [True, False, False]
+    bpy.ops.transform.translate(value=(1.0, 0.0, 0.0))
+    assert abs(selection_drawing.strokes[0].points[0].position.x - 1.0) < 1e-6
+    assert abs(selection_drawing.strokes[1].points[0].position.x) < 1e-6
+    assert pencil.select_row(context, stroke_rows[2].key, extend=True)
+    assert [native_stroke.select for native_stroke in selection_drawing.strokes] == [True, False, True]
+    assert pencil.selection_command(context, "duplicate")
+    assert len(selection_drawing.strokes) == 5
+    assert len(pencil.stroke_rows(selection_object, 0, True, False)) == 5
+    assert pencil.selection_command(context, "delete")
+    assert len(selection_drawing.strokes) == 3
+    assert len(pencil.stroke_rows(selection_object, 0, True, False)) == 3
+    assert context.view_layer.objects.active == selection_object and selection_object.data == selection_data
+    pencil.leave(context)
+    report["individual_and_multiple_strokes_stay_in_same_object"] = True
+get_state().tool = "select"
 report["passed"] = True
 output: Path = Path(__file__).resolve().parents[1] / ".checks/drawing-report.json"
 output.write_text(json.dumps(report, indent=2), encoding="utf-8")

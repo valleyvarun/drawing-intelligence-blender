@@ -7,11 +7,16 @@ $setup = Join-Path $appRoot 'wizard/dist/Drawing-Intelligence-Blender-Setup.exe'
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 $env:TEMP = $testRoot
 $env:TMP = $testRoot
-$install = Join-Path $testRoot 'Install With Spaces'
+$install = Join-Path $testRoot ('Install With Spaces ' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 
 function Invoke-Setup([string[]]$Arguments, [int]$Expected) {
     $process = Start-Process -FilePath $setup -ArgumentList $Arguments -WindowStyle Hidden -PassThru -Wait
-    if ($process.ExitCode -ne $Expected) { throw "Expected exit $Expected; got $($process.ExitCode): $Arguments" }
+    if ($process.ExitCode -ne $Expected) {
+        foreach ($log in @((Join-Path $install 'install.log'), (Join-Path $testRoot 'Drawing-Intelligence-Blender-Setup.log'))) {
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 15 | Write-Output }
+        }
+        throw "Expected exit $Expected; got $($process.ExitCode): $Arguments"
+    }
 }
 function Assert-File([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Missing expected file: $Path" }
@@ -39,12 +44,12 @@ if (-not $Integration) { exit 0 }
 
 # Full integration uses only a fresh test installation and its own product identity.
 $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\valleyvarun.drawing-intelligence-blender'
-$startLink = Join-Path ([Environment]::GetFolderPath('Programs')) 'Drawing Intelligence (Blender).lnk'
-$desktopLink = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Drawing Intelligence (Blender).lnk'
+$startLink = Join-Path ([Environment]::GetFolderPath('Programs')) 'Drawing Intelligence.lnk'
+$desktopLink = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Drawing Intelligence.lnk'
 if ((Test-Path $key) -or (Test-Path -LiteralPath $startLink) -or (Test-Path -LiteralPath $desktopLink)) {
     throw 'An existing product registration/shortcut must not be changed by this test.'
 }
-if (-not $BlenderZip) { $BlenderZip = Join-Path $appRoot '.checks/blender-5.2.2-windows-x64.zip' }
+if (-not $BlenderZip) { $BlenderZip = Join-Path $appRoot 'build/downloads/blender-5.2.2-windows-x64.zip' }
 Assert-File $BlenderZip
 $source = Join-Path $testRoot ('source-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $source | Out-Null
@@ -62,7 +67,15 @@ $sourceZip = $source + '.zip'
 $arguments = @('/silent', '/accepteula', '/nodesktop', ('/dir="' + $install + '"'), ('/sourcezip="' + $sourceZip + '"'), ('/blenderzip="' + $BlenderZip + '"'))
 try {
     Invoke-Setup $arguments 0
-    Assert-File (Join-Path $install 'engine/blender.exe')
+    $engineExe = Join-Path $install 'engine/Drawing Intelligence.exe'
+    Assert-File $engineExe
+    Assert-File (Join-Path $install 'Drawing Intelligence.exe')
+    Assert-File (Join-Path $install 'engine/drawing-intelligence-engine.txt')
+    Assert-File (Join-Path $install 'app/template/startup/bl_app_templates_system/drawing_intelligence/startup.blend')
+    if (Test-Path -LiteralPath (Join-Path $install 'engine/blender.exe')) { throw 'Installed engine still uses the Blender executable name.' }
+    if ([Diagnostics.FileVersionInfo]::GetVersionInfo($engineExe).ProductName -ne 'Drawing Intelligence') {
+        throw 'The installed engine has the wrong application identity.'
+    }
     Assert-File (Join-Path $install 'app/bootstrap.py')
     Assert-File (Join-Path $install 'uninstall.exe')
     Assert-File $startLink
@@ -70,7 +83,8 @@ try {
     if ((Get-ItemProperty -LiteralPath $key).InstallLocation -ne $install) { throw 'Incorrect uninstall registration.' }
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($startLink)
-    if ($shortcut.TargetPath -ne (Join-Path $install 'launch.cmd')) { throw 'Incorrect shortcut target.' }
+    if ($shortcut.TargetPath -ne (Join-Path $install 'Drawing Intelligence.exe')) { throw 'Incorrect shortcut target.' }
+    if ($shortcut.WindowStyle -ne 1) { throw 'The shortcut should launch the application normally.' }
     New-Item -ItemType Directory -Path (Join-Path $install 'runtime') | Out-Null
     [IO.File]::WriteAllText((Join-Path $install 'runtime/keep.txt'), 'preferences')
     [IO.File]::WriteAllText((Join-Path $install 'keep.blend'), 'test project')
@@ -81,9 +95,9 @@ try {
     Assert-File (Join-Path $install 'keep.blend')
     # A failed update must leave the installed app intact.
     Invoke-Setup @('/silent', '/accepteula', ('/dir="' + $install + '"'), ('/blenderzip="' + $bad + '"')) 3
-    Assert-File (Join-Path $install 'engine/blender.exe')
+    Assert-File $engineExe
     Assert-File (Join-Path $install 'app/bootstrap.py')
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $install 'run.ps1') -Background -Profile wizard-smoke
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $install 'run.ps1') -Background -ProfileName wizard-smoke
     if ($LASTEXITCODE -ne 0) { throw 'Installed application could not launch.' }
 }
 finally {

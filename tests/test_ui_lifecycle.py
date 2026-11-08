@@ -170,6 +170,7 @@ def cube() -> Any:
 
 def assert_layout() -> None:
     assert controller._ACTIVE is not None and not controller._ACTIVE.closed
+    assert bpy.context.preferences.apps.show_edge_resize
     ordered: list[tuple[int, str]] = []
     area: Any
     for area in window().screen.areas:
@@ -408,7 +409,7 @@ def verify_reset() -> None:
     for area in window().screen.areas:
         measured[layout.role(area)] = int(area.width)
     SIDEBAR_WIDTHS = (measured["toolbox"], measured["layers"])
-    assert (get_state().left_width, get_state().right_width) == (220, 330)
+    assert (get_state().left_width, get_state().right_width) == (220, 280)
     SESSION_BEFORE = controller._ACTIVE
     controller.dispatch("layout_reset")
 
@@ -422,7 +423,7 @@ def verify_second_reset() -> None:
         measured[layout.role(area)] = int(area.width)
     assert abs(measured["toolbox"] - SIDEBAR_WIDTHS[0]) <= 1
     assert abs(measured["layers"] - SIDEBAR_WIDTHS[1]) <= 1
-    assert (get_state().left_width, get_state().right_width) == (220, 330)
+    assert (get_state().left_width, get_state().right_width) == (220, 280)
     REPORT["repeated_layout_reset_has_no_width_drift"] = True
     click("tool_move")
 

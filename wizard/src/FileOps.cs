@@ -99,6 +99,16 @@ namespace DrawingSetup
         }
 
         // --- 2) MOVE ---
+        public static void MovePath(string source, string target)
+        {
+            bool directory = Directory.Exists(source);
+            Retry(delegate
+            {
+                if (directory) Directory.Move(source, target);
+                else File.Move(source, target);
+            });
+        }
+
         // Moves every entry of one folder into another on the same volume, merging existing folders.
         public static void MoveContents(string sourceDir, string targetDir, ICollection<string> excludes)
         {

@@ -6,6 +6,7 @@ import ctypes
 import math
 import os
 import sys
+from _ctypes import CFuncPtr
 from ctypes import wintypes
 from typing import Any, Literal, TypeAlias
 
@@ -18,6 +19,9 @@ WM_POINTERUPDATE: int = 0x0245
 WM_POINTERDOWN: int = 0x0246
 WM_POINTERUP: int = 0x0247
 WM_POINTERCAPTURECHANGED: int = 0x024C
+WM_NCDESTROY: int = 0x0082
+# Failed native detachments must keep their Python callbacks alive.
+_RETAINED: dict[int, TouchNavigation] = {}
 
 
 def _center(points: list[Point]) -> Point:
@@ -33,9 +37,9 @@ def _center(points: list[Point]) -> Point:
 class TouchNavigation:
     def __init__(self) -> None:
         self._hwnd: int | None = None
-        self._user32: Any = None
-        self._comctl32: Any = None
-        self._callback: Any = None
+        self._user32: ctypes.WinDLL | None = None
+        self._comctl32: ctypes.WinDLL | None = None
+        self._callback: CFuncPtr | None = None
         self._contacts: dict[int, Point] = {}
         self._previous: dict[int, Point] = {}
         self._start: dict[int, Point] = {}
@@ -45,13 +49,14 @@ class TouchNavigation:
         self._area: Any = None
         self._region: Any = None
         self._failed: bool = False
+        self._closed: bool = False
 
     @property
     def active(self) -> bool:
         return bool(self._contacts)
 
     def _install(self) -> None:
-        if sys.platform != "win32" or self._hwnd is not None or self._failed or bpy.app.background:
+        if sys.platform != "win32" or self._hwnd is not None or self._failed or self._closed or bpy.app.background:
             return
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
         self._comctl32 = ctypes.WinDLL("comctl32", use_last_error=True)
@@ -65,7 +70,7 @@ class TouchNavigation:
         self._user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process))
         if int(process.value) != os.getpid():
             return
-        name: Any = ctypes.create_unicode_buffer(128)
+        name: ctypes.Array[ctypes.c_wchar] = ctypes.create_unicode_buffer(128)
         self._user32.GetClassNameW(hwnd, name, 128)
         if "GHOST" not in name.value:
             return
@@ -75,7 +80,7 @@ class TouchNavigation:
         self._user32.ScreenToClient.restype = wintypes.BOOL
         self._user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
         self._user32.GetClientRect.restype = wintypes.BOOL
-        callback_type: Any = ctypes.WINFUNCTYPE(
+        callback_type: type[CFuncPtr] = ctypes.WINFUNCTYPE(
             ctypes.c_ssize_t,
             wintypes.HWND,
             wintypes.UINT,
@@ -98,6 +103,16 @@ class TouchNavigation:
             print("Touch navigation could not attach to the Blender window.")
 
     def _message(self, hwnd: int, message: int, wparam: int, lparam: int, subclass: int, data: int) -> int:
+        if self._comctl32 is None:
+            return 0
+        if message == WM_NCDESTROY:
+            if self._callback is not None:
+                self._comctl32.RemoveWindowSubclass(hwnd, self._callback, id(self))
+            self._hwnd = None
+            self._closed = True
+            self._contacts.clear()
+        if self._closed or self._user32 is None:
+            return int(self._comctl32.DefSubclassProc(hwnd, message, wparam, lparam))
         pointer: int = wparam & 0xFFFF
         if message == WM_POINTERCAPTURECHANGED:
             self._contacts.pop(pointer, None)
@@ -129,7 +144,7 @@ class TouchNavigation:
         return int(self._comctl32.DefSubclassProc(hwnd, message, wparam, lparam))
 
     def tick(self, context: Any) -> None:
-        if sys.platform != "win32" or bpy.app.background or context.window is None:
+        if self._closed or sys.platform != "win32" or bpy.app.background or context.window is None:
             return
         self._install()
         area: Any
@@ -175,7 +190,13 @@ class TouchNavigation:
         last: Point = _center(before)
         rv3d: Any = self._area.spaces.active.region_3d
         if self._gesture == "zoom":
-            zoom_view(self._region, rv3d, center, math.dist(before[0], before[1]) / max(math.dist(now[0], now[1]), 1.0))
+            zoom_view(
+                self._region,
+                rv3d,
+                center,
+                math.dist(before[0], before[1]) / max(math.dist(now[0], now[1]), 1.0),
+                context,
+            )
         elif self._gesture == "orbit":
             orbit_view(rv3d, center[0] - last[0], center[1] - last[1], self._region.width, self._region.height)
         else:
@@ -183,10 +204,23 @@ class TouchNavigation:
         self._area.tag_redraw()
 
     def destroy(self) -> None:
+        self._closed = True
+        detached: bool = True
         if self._hwnd is not None and self._callback is not None:
-            self._comctl32.RemoveWindowSubclass(self._hwnd, self._callback, id(self))
-        self._hwnd = None
-        self._callback = None
+            detached = self._comctl32 is not None and bool(
+                self._comctl32.RemoveWindowSubclass(self._hwnd, self._callback, id(self))
+            )
+        if detached:
+            self._hwnd = None
+            self._callback = None
+            _RETAINED.pop(id(self), None)
+        else:
+            # Windows can still call this function after the session has been discarded.
+            _RETAINED[id(self)] = self
         self._contacts.clear()
         self._previous.clear()
         self._start.clear()
+        self._gesture = ""
+        self._area = None
+        self._region = None
+        self._rect = None

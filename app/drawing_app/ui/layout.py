@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from ..core.blender import bpy
-from ..core.state import get_state
+from ..core.state import get_state, save_preferences
 
 _ROLES: dict[int, str] = {}
 _PENDING: bool = False
 _WIDTH_BASE: dict[str, tuple[int, float]] = {}
+_WIDTH_SAVE_AT: float = 0.0
 
 
 def _area_size(area: Any) -> int:
@@ -18,6 +20,45 @@ def _area_size(area: Any) -> int:
 
 def _area_x(area: Any) -> int:
     return int(area.x)
+
+
+def sidebar_widths(width: float, scale: float) -> tuple[int, int]:
+    """Restore chosen widths, reducing them only when they cannot fit the window."""
+    left: float = max(29.0, float(get_state().left_width)) * scale
+    right: float = max(29.0, float(get_state().right_width)) * scale
+    available: float = max(2.0, width - 29.0 * scale)
+    factor: float = min(1.0, available / (left + right))
+    return max(1, round(left * factor)), max(1, round(right * factor))
+
+
+def on_divider(context: Any, x: int, y: int) -> bool:
+    """Leave the native resize hit zone available to Blender's screen handler."""
+    scale: float = max(1.0, float(context.preferences.system.ui_scale))
+    padding: float = (float(context.preferences.view.border_width) + 3.0) * scale
+    area: Any
+    for area in context.window.screen.areas:
+        name: str = role(area)
+        if name not in ("toolbox", "layers") or not area.y <= y < area.y + area.height:
+            continue
+        edge: int = int(area.x + area.width) if name == "toolbox" else int(area.x)
+        if abs(x - edge) <= padding:
+            return True
+    return False
+
+
+def reset_panel_cursor(context: Any, x: int, y: int) -> None:
+    """Clear stale border cursors where custom panels consume mouse movement."""
+    if on_divider(context, x, y):
+        return
+    area: Any
+    for area in context.window.screen.areas:
+        if (
+            role(area) in ("toolbox", "layers")
+            and area.x <= x < area.x + area.width
+            and area.y <= y < area.y + area.height
+        ):
+            context.window.cursor_set("DEFAULT")
+            return
 
 
 def role(area: Any) -> str:
@@ -55,15 +96,44 @@ def _clean_space(area: Any) -> None:
         space.image = None
         space.show_region_ui = False
         space.show_region_toolbar = False
+        # The panels are application canvases; the image editor's zoom and pan gizmos stay hidden.
+        space.show_gizmo = False
 
 
-def configure(context: Any) -> None:
-    """Collapse the factory workspace, then split actual resizable native areas."""
+def _adopt(screen: Any, width: float, scale: float) -> bool:
+    """Claim the saved Tool Box | viewport | Clayers editors from the application's startup file."""
+    areas: list[Any] = sorted(screen.areas, key=_area_x)
+    types: list[str] = []
+    area: Any
+    for area in areas:
+        types.append(str(area.type))
+    if types != ["IMAGE_EDITOR", "VIEW_3D", "IMAGE_EDITOR"]:
+        return False
+    targets: tuple[int, int] = sidebar_widths(width, scale)
+    tolerance: float = 4.0 * scale
+    if abs(int(areas[0].width) - targets[0]) > tolerance or abs(int(areas[-1].width) - targets[1]) > tolerance:
+        return False
+    _ROLES.clear()
+    _WIDTH_BASE.clear()
+    name: str
+    for area, name in zip(areas, ("toolbox", "viewport", "layers")):
+        _ROLES[int(area.as_pointer())] = name
+        _clean_space(area)
+        area.tag_redraw()
+    screen.show_statusbar = False
+    _WIDTH_BASE["toolbox"] = (int(areas[0].width), float(get_state().left_width))
+    _WIDTH_BASE["layers"] = (int(areas[-1].width), float(get_state().right_width))
+    return True
+
+
+def configure(context: Any, adopt: bool = True) -> None:
+    """Use the startup file's editors, or collapse the screen and split actual resizable native areas."""
     global _PENDING
     if _PENDING:
         return
     window: Any = context.window
     screen: Any = window.screen
+    scale: float = max(1.0, float(context.preferences.system.ui_scale))
     context.preferences.view.use_reduce_motion = True
     claimed: list[Any] = []
     area: Any
@@ -71,6 +141,8 @@ def configure(context: Any) -> None:
         if role(area):
             claimed.append(area)
     if len(screen.areas) == 3 and len(claimed) == 3:
+        return
+    if adopt and not claimed and _adopt(screen, float(window.width), scale):
         return
     _ROLES.clear()
     _WIDTH_BASE.clear()
@@ -97,10 +169,12 @@ def configure(context: Any) -> None:
     if len(screen.areas) != 1:
         raise RuntimeError("The drawing workspace requires one initial editor")
     main: Any = screen.areas[0]
-    width: float = float(max(window.width, main.width, 800))
-    scale: float = max(1.0, float(context.preferences.system.ui_scale))
-    left: float = max(145.0, min(float(get_state().left_width) * scale, width * 0.28))
-    right: float = max(250.0, min(float(get_state().right_width) * scale, width * 0.35))
+    width: float = float(max(window.width, main.width, 1))
+    left: int
+    right: int
+    left, right = sidebar_widths(width, scale)
+    get_state().left_width = round(left / scale)
+    get_state().right_width = round(right / scale)
     with context.temp_override(window=window, screen=screen, area=main):
         main.type = "VIEW_3D"
         bpy.ops.screen.area_split(direction="VERTICAL", factor=left / width)
@@ -160,22 +234,60 @@ def redraw(context: Any | None = None) -> None:
                 area.tag_redraw()
 
 
-def remember_width(area: Any, scale: float) -> None:
+def _save_widths() -> float | None:
+    """Write once after divider movement settles, outside the draw callback."""
+    remaining: float = _WIDTH_SAVE_AT - time.monotonic()
+    if _PENDING or remaining > 0.0:
+        return max(0.05, remaining)
+    save_preferences()
+    return None
+
+
+def capture_widths(context: Any) -> None:
+    """Capture final dimensions before save or shutdown, even without a final redraw."""
+    if not _PENDING and not bpy.app.background:
+        window: Any = context.window
+        if window is None and context.window_manager.windows:
+            window = context.window_manager.windows[0]
+        if window is not None:
+            scale: float = max(1.0, float(context.preferences.system.ui_scale))
+            area: Any
+            for area in window.screen.areas:
+                remember_width(area, scale, save=False)
+    if bpy.app.timers.is_registered(_save_widths):
+        bpy.app.timers.unregister(_save_widths)
+
+
+def remember_width(area: Any, scale: float, *, save: bool = True) -> None:
     """Persist resize deltas without counting native editor-border thickness."""
+    global _WIDTH_SAVE_AT
+    if _PENDING:
+        return
     name: str = role(area)
     baseline: tuple[int, float] | None = _WIDTH_BASE.get(name)
     if baseline is None:
         return
-    width: int = round(max(80.0, baseline[1] + (int(area.width) - baseline[0]) / scale))
+    width: int = round(max(29.0, baseline[1] + (int(area.width) - baseline[0]) / scale))
     if name == "toolbox":
+        if get_state().left_width == width:
+            return
         get_state().left_width = width
     elif name == "layers":
+        if get_state().right_width == width:
+            return
         get_state().right_width = width
+    else:
+        return
+    if save and not bpy.app.background:
+        _WIDTH_SAVE_AT = time.monotonic() + 0.4
+        if not bpy.app.timers.is_registered(_save_widths):
+            bpy.app.timers.register(_save_widths, first_interval=0.4)
 
 
 def reset(context: Any) -> None:
     """Restore the initial sidebar widths through the same native layout path."""
     get_state().left_width = 220
-    get_state().right_width = 330
+    get_state().right_width = 280
     _ROLES.clear()
-    configure(context)
+    # Rebuild the editors from one area, as the default widths are split exactly.
+    configure(context, adopt=False)

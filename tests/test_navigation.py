@@ -1,4 +1,4 @@
-"""Native Blender property checks and mathutils-backed camera regressions."""
+"""Native viewport settings, native-navigation routing, and mathutils-backed camera regressions."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import drawing_app.viewport.guides as guides
 import drawing_app.viewport.navigation as navigation
 from drawing_app.core.blender import Matrix, Vector, bpy, view3d_utils
 from drawing_app.core.state import ROOT, get_state
-from drawing_app.viewport import configure_viewport, grid_spacing, install_guides, remove_guides, ruler_origin
+from drawing_app.viewport import configure_viewport, grid_spacing, install_guides, keymap, remove_guides, ruler_origin
 from drawing_app.viewport.guides import Label, _labels, label_interval
 from drawing_app.viewport.navigation import (
     NavigationController,
@@ -76,6 +76,10 @@ def redraw() -> None:
     pass
 
 
+def area_pointer() -> int:
+    return 1
+
+
 def guide_undo_lifecycle() -> None:
     """Dispatch installed handlers after real Image ID removal without a GPU."""
     handlers: list[Any]
@@ -100,12 +104,15 @@ def guide_undo_lifecycle() -> None:
 def controller_checks(region: Any) -> None:
     rv3d: RegionView = RegionView()
     area: Any = SimpleNamespace(
-        type="VIEW_3D", spaces=SimpleNamespace(active=SimpleNamespace(region_3d=rv3d)), tag_redraw=redraw
+        type="VIEW_3D",
+        spaces=SimpleNamespace(active=SimpleNamespace(region_3d=rv3d)),
+        tag_redraw=redraw,
+        as_pointer=area_pointer,
     )
     area.spaces.active.clip_start = 0.001
     area.spaces.active.clip_end = 100000.0
     guides.update_clipping(area)
-    assert area.spaces.active.clip_end < 200.0
+    assert area.spaces.active.clip_end >= 1000.0
     assert area.spaces.active.clip_start > 0.001
     local_far: float = area.spaces.active.clip_end
     rv3d.view_location.x += 1000000.0
@@ -115,43 +122,62 @@ def controller_checks(region: Any) -> None:
     assert abs(area.spaces.active.clip_end - local_far) < 1e-4
     rv3d.view_location = Vector((2.0, -1.0, 0.5))
     rv3d.update()
-    REPORT["surface_depth_precision_independent_of_xy_travel"] = True
+    REPORT["stable_depth_range_independent_of_xy_travel"] = True
     controller: NavigationController = NavigationController()
     saved_preferences: Callable[[], None] = navigation.save_preferences
     navigation.save_preferences = redraw
     try:
         get_state().navigation = "orbit"
         get_state().zoom_speed = 1.0
+        # At the default speed the wheel belongs to Blender's view3d.zoom.
+        assert not controller.handle(bpy.context, event("WHEELUPMOUSE"), area, region)
+        assert rv3d.view_distance == 12.0
+        get_state().zoom_speed = 2.0
         assert controller.handle(bpy.context, event("WHEELUPMOUSE"), area, region)
-        assert abs(rv3d.view_distance / 12.0 - 0.88) < 1e-8
+        assert abs(rv3d.view_distance / 12.0 - math.pow(navigation.WHEEL_STEP, -2.0)) < 1e-8
         pivot: Any = rv3d.view_location.copy()
         distance: float = rv3d.view_distance
         assert controller.handle(bpy.context, event("WHEELUPMOUSE", shift=True), area, region)
-        assert get_state().zoom_speed == 1.25 and rv3d.view_distance == distance
+        assert get_state().zoom_speed == 2.5 and rv3d.view_distance == distance
         assert (rv3d.view_location - pivot).length < 1e-8
-        REPORT["wheel_detent_and_shift_speed_without_camera_motion"] = True
+        REPORT["native_wheel_step_and_adjustable_speed"] = True
+        kind: str
+        for kind in ("RIGHTMOUSE", "MIDDLEMOUSE"):
+            assert not controller.handle(bpy.context, event(kind), area, region)
+            assert not controller.active
         get_state().navigation = "fly"
-        assert controller.handle(bpy.context, event("RIGHTMOUSE"), area, region)
+        rv3d.view_distance = 50.0
+        assert not controller.handle(bpy.context, event("RIGHTMOUSE"), area, region)
+        assert abs(float(bpy.context.preferences.inputs.walk_navigation.walk_speed) - 20.0) < 1e-4
+        REPORT["navigation_drags_pass_to_native_operators"] = True
+        REPORT["fly_speed_follows_view_scale"] = True
+        assert controller.handle(bpy.context, event("LEFTMOUSE", x=76.0, y=76.0), area, region)
         assert controller.viewport_context == (area, region)
-        eye: Any = rv3d.view_matrix.inverted().translation.copy()
-        assert controller.handle(bpy.context, event("MOUSEMOVE", "NOTHING", 580.0, 430.0), area, region)
-        assert (rv3d.view_matrix.inverted().translation - eye).length < 1e-5
-        key: str
-        for key in ("W", "A", "S", "D", "Q", "E"):
-            pivot = rv3d.view_location.copy()
-            assert controller.handle(bpy.context, event(key), area, region)
-            controller.tick(bpy.context, 0.1)
-            assert controller.handle(bpy.context, event(key, "RELEASE"), area, region)
-            assert (rv3d.view_location - pivot).length > 0.01, key
-        assert controller.handle(bpy.context, event("RIGHTMOUSE", "RELEASE"), area, region)
+        assert controller.handle(bpy.context, event("MOUSEMOVE", "NOTHING", x=96.0, y=86.0), area, region)
+        assert controller.handle(bpy.context, event("LEFTMOUSE", "RELEASE", x=96.0, y=86.0), area, region)
         assert not controller.active and controller.viewport_context is None
-        REPORT["fly_look_preserves_eye_and_wasdqe_translate"] = True
-        REPORT["captured_navigation_release"] = True
+        REPORT["captured_gizmo_navigation_release"] = True
+        keymap.install()
+        get_state().navigation = "orbit"
+        keymap.update()
+        bindings: list[str] = keymap.active_bindings()
+        assert "3D View:RIGHTMOUSE:view3d.rotate" in bindings and "3D View:MIDDLEMOUSE:view3d.move" in bindings
+        assert "Object Mode:RIGHTMOUSE:view3d.rotate" in bindings
+        assert "Grease Pencil Draw Mode:RIGHTMOUSE:view3d.rotate" in bindings
+        assert not any(binding.endswith("view3d.walk") for binding in bindings)
+        get_state().navigation = "fly"
+        keymap.update()
+        assert "3D View:RIGHTMOUSE:view3d.walk" in keymap.active_bindings()
+        REPORT["native_navigation_keymap_bindings"] = True
+        get_state().tool = "grease"
+        assert not controller.handle(bpy.context, event("F"), area, region)
+        REPORT["grease_pencil_native_radius_shortcut"] = True
     finally:
         navigation.save_preferences = saved_preferences
         controller.destroy()
         get_state().navigation = "orbit"
         get_state().zoom_speed = 1.0
+        get_state().tool = "select"
 
 
 def main() -> None:
@@ -228,7 +254,9 @@ def main() -> None:
             unit_settings=SimpleNamespace(scale_length=1.0), cursor=SimpleNamespace(location=Vector((8.0, 9.0, 3.0)))
         )
     )
-    fake_area: Any = SimpleNamespace(spaces=SimpleNamespace(active=SimpleNamespace(region_3d=rv3d)))
+    fake_area: Any = SimpleNamespace(
+        spaces=SimpleNamespace(active=SimpleNamespace(region_3d=rv3d)), as_pointer=area_pointer
+    )
     labels: list[Label] = _labels(context, fake_area, region, (0.0, 0.0, 0.0), 1.0)
     negative: bool = False
     label: Label

@@ -64,6 +64,7 @@ _HOVER_TIME: float = 0.0
 _CURRENT: list[Widget] = []
 _AREA: int = 0
 _SCALE: float = 1.0
+_TOOLBOX_SELECTION: tuple[str, str] | None = None
 
 
 def _show_tooltip() -> float | None:
@@ -241,23 +242,27 @@ def _slider(
     maximum: float,
     scale: float,
     pressure: str,
+    *,
+    action: str = "brush",
+    pressed: bool | None = None,
 ) -> float:
+    """Numeric field, slider, and optional stylus-pressure toggle; empty `pressure` hides the toggle."""
     paint.text(label, x, y)
     y -= 31
     _field(
-        "brush_" + name, x, y, 48, value, "brush", (name,), minimum=minimum, maximum=maximum, scale=scale, tooltip=label
+        "brush_" + name, x, y, 48, value, action, (name,), minimum=minimum, maximum=maximum, scale=scale, tooltip=label
     )
     left: float = x + 55
-    width: float = max(30, w - 86)
+    width: float = max(30, w - (86 if pressure else 58))
     paint.rect(left, y + 9, width, 6, (0.12, 0.12, 0.12, 1), 3)
-    fraction: float = max(0.0, min(1.0, (value - minimum) / (maximum - minimum)))
+    fraction: float = max(0.0, min(1.0, (value - minimum) / max(maximum - minimum, 1e-12)))
     paint.rect(left, y + 9, max(1, width * fraction), 6, (0.39, 0.46, 0.53, 1), 3)
     paint.circle(left + width * fraction, y + 12, 6, (0.70, 0.73, 0.76, 1), True)
     _CURRENT.append(
         Widget(
             "slider_" + name,
             (left, y, width, 24),
-            "brush",
+            action,
             kind="slider",
             value=value,
             minimum=minimum,
@@ -267,25 +272,171 @@ def _slider(
             tooltip=label,
         )
     )
-    pressed: bool = bool(getattr(get_state().brush, pressure))
-    _button(
-        "pressure_" + name,
-        "",
-        x + w - 25,
-        y,
-        25,
-        "brush",
-        (pressure, not pressed),
-        icon="pressure",
-        selected=pressed,
-        tooltip="Stylus pressure controls " + label.lower(),
-        height=24,
-    )
+    if pressure:
+        enabled: bool = pressed if pressed is not None else bool(getattr(get_state().brush, pressure))
+        _button(
+            "pressure_" + name,
+            "",
+            x + w - 25,
+            y,
+            25,
+            action,
+            (pressure, not enabled),
+            icon="pressure",
+            selected=enabled,
+            tooltip="Stylus pressure controls " + label.lower(),
+            height=24,
+        )
     return y - 24
 
 
+SWATCHES: tuple[tuple[float, float, float], ...] = (
+    (0.015, 0.015, 0.015),
+    (0.8, 0.8, 0.8),
+    (0.65, 0.06, 0.04),
+    (0.05, 0.32, 0.7),
+    (0.06, 0.45, 0.13),
+    (0.65, 0.36, 0.015),
+)
+
+
+def _swatches(x: float, y: float, width: float, action: str, tooltip: str) -> float:
+    index: int
+    color: tuple[float, float, float]
+    for index, color in enumerate(SWATCHES):
+        sw: float = width / 6 - 3
+        paint.rect(x + index * (width / 6), y, sw, 22, (*color, 1), 3)
+        _CURRENT.append(
+            Widget(
+                f"{action}_color_{index}",
+                (x + index * (width / 6), y, sw, 22),
+                action,
+                ("color", color),
+                tooltip=tooltip,
+            )
+        )
+    return y - 34
+
+
+def _pencil(context: Any, x: float, y: float, width: float) -> float:
+    """Blender's Grease Pencil Draw-mode tools, the active brush asset, materials, and placement."""
+    from ..tools import pencil
+
+    view: pencil.PencilView | None = pencil.view(context)
+    index: int
+    label: str
+    paint.text("Grease Pencil settings", x, y)
+    y -= 31
+    if view is None:
+        paint.text(get_state().status or "Draw mode is unavailable", x, y, color=paint.MUTED, max_width=width)
+        return y - 28
+    if view.brushes and view.tool != "builtin.brush":
+        paint.text("Brush", x, y)
+        y -= 31
+        items: list[MenuItem] = []
+        name: str
+        for name in view.brushes:
+            items.append((name, "pencil", ("brush", name)))
+        _button("pencil_brush", view.brush + "  v", x, y, width, "popup", items, tooltip="Blender brush asset")
+        y -= 32
+    if view.brush:
+        if view.tool != "builtin_brush.Fill":
+            factor: float = _units()[0] if view.size_scene else 1.0
+            unit: str = get_state().units if view.size_scene else "px"
+            y = _slider(
+                "size",
+                f"Radius ({unit})",
+                view.size * factor,
+                x,
+                y,
+                width,
+                view.size_range[0] * factor,
+                view.size_range[1] * factor,
+                1.0 / factor,
+                "pressure_size",
+                action="pencil",
+                pressed=view.pressure_size,
+            )
+            y = _slider(
+                "strength",
+                "Strength",
+                view.strength * 100,
+                x,
+                y,
+                width,
+                0,
+                100,
+                0.01,
+                "pressure_strength",
+                action="pencil",
+                pressed=view.pressure_strength,
+            )
+        if view.tool in pencil.DRAW_TOOLS:
+            y = _slider("hardness", "Hardness", view.hardness * 100, x, y, width, 0, 100, 0.01, "", action="pencil")
+    if view.tool == "builtin_brush.Fill":
+        y = _slider(
+            "fill_opacity",
+            "Opacity",
+            get_state().pencil.fill_opacity * 100,
+            x,
+            y,
+            width,
+            0,
+            100,
+            0.01,
+            "",
+            action="pencil",
+        )
+    if view.material:
+        paint.text("Material", x, y)
+        y -= 29
+        color: tuple[float, float, float]
+        for index, (name, color) in enumerate(pencil.COLORS):
+            swatch: float = width / 6 - 3
+            left: float = x + index * (width / 6)
+            if name == view.material:
+                paint.rect(left - 2, y - 2, swatch + 4, 26, paint.SELECTED, 4)
+            paint.rect(left, y, swatch, 22, (*color, 1), 3)
+            _CURRENT.append(
+                Widget("pencil_material_" + name, (left, y, swatch, 22), "pencil", ("material", name), tooltip=name)
+            )
+        y -= 34
+    if view.tool in pencil.DRAW_TOOLS:
+        _checkbox(
+            "pencil_stabilize", "Stabilize stroke", x, y, view.stabilize, "pencil", ("stabilize", not view.stabilize)
+        )
+        y -= 30
+    paint.text("Stroke placement", x, y)
+    y -= 31
+    options: list[MenuItem] = []
+    code: str
+    for code, label in pencil.PLACEMENTS:
+        options.append((label, "pencil", ("placement", code)))
+    _button("pencil_placement", pencil.placement_text(view.placement) + "  v", x, y, width, "popup", options)
+    y -= 32
+    paint.text("Drawing plane", x, y)
+    y -= 31
+    planes: list[MenuItem] = []
+    for code, label in pencil.PLANES:
+        planes.append((label, "pencil", ("plane", code)))
+    _button("pencil_plane", pencil.plane_text(view.plane) + "  v", x, y, width, "popup", planes)
+    y -= 30
+    if view.canvas:
+        paint.text("Canvas: " + view.canvas, x, y, 11, color=paint.MUTED, max_width=width)
+        y -= 22
+    return y
+
+
 def _toolbox(context: Any, w: float, h: float) -> None:
+    global _TOOLBOX_SELECTION
+    from ..tools import pencil
+
     state: AppState = get_state()
+    selecting: bool = state.tool == "select"
+    selection: tuple[str, str] = (state.tool, state.pencil.tool if state.tool == "grease" else "")
+    if selection != _TOOLBOX_SELECTION:
+        _SCROLL["toolbox"] = 0.0
+        _TOOLBOX_SELECTION = selection
     unit_scale: float = float(context.scene.unit_settings.scale_length)
     paint.rect(0, 0, w, h, paint.PANEL)
     y: float = h - 28 + _SCROLL["toolbox"]
@@ -293,18 +444,17 @@ def _toolbox(context: Any, w: float, h: float) -> None:
     width: float = w - 20
     groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("Transform", (("move", "Move"), ("rotate", "Rotate"), ("scale", "Scale"))),
-        ("Drawing", (("paint", "3D Paint"), ("pipe", "3D Pipe"), ("grease", "Grease Pencil"))),
+        ("Drawing", (("paint", "3D Paint"), ("pipe", "3D Pipe"), *pencil.DRAWING_TOOLS)),
+        ("Erase", pencil.ERASING_TOOLS),
     )
+    active_tool: str = state.pencil.tool if state.tool == "grease" else state.tool
+    columns: int = max(1, min(4, int((width + 8) // 46)))
     title: str
     tools: tuple[tuple[str, str], ...]
     for title, tools in groups:
-        contains_active: bool = False
-        descriptor: tuple[str, str]
-        for descriptor in tools:
-            contains_active = contains_active or descriptor[0] == state.tool
-        if state.tool != "select" and not contains_active:
+        if not selecting and active_tool not in dict(tools):
             continue
-        if state.tool == "select":
+        if selecting:
             paint.text(title, x, y, 14)
             y -= 47
         else:
@@ -313,23 +463,25 @@ def _toolbox(context: Any, w: float, h: float) -> None:
         name: str
         label: str
         for name, label in tools:
-            if state.tool != "select" and name != state.tool:
+            if not selecting and name != active_tool:
                 continue
+            native: bool = name.startswith("builtin")
+            selected: bool = name == active_tool
             _button(
-                "tool_" + name,
+                "tool_grease" if name == "builtin.brush" else "pencil_tool_" + name if native else "tool_" + name,
                 "",
-                x + index * 46,
-                y,
+                x + (index % columns) * 46,
+                y - (index // columns) * 46,
                 38,
-                "tool",
-                "select" if state.tool == name else name,
-                selected=state.tool == name,
-                icon=name,
+                "pencil" if native and not selected else "tool",
+                "select" if selected else ("tool", name) if native else name,
+                selected=selected,
+                icon="grease" if name == "builtin.brush" else name,
                 tooltip=label,
                 height=38,
             )
             index += 1
-        y -= 30
+        y -= max(0, (index + columns - 1) // columns - 1) * 46 + 30
     paint.text("Canvas", x, y, 14)
     y -= 47
     options: tuple[tuple[str, str, str], ...] = (
@@ -407,7 +559,9 @@ def _toolbox(context: Any, w: float, h: float) -> None:
             )
             index += 1
         y -= 30
-    if state.tool in ("paint", "pipe", "grease"):
+    if state.tool == "grease":
+        y = _pencil(context, x, y, width)
+    elif state.tool in ("paint", "pipe"):
         brush: Brush = state.brush
         factor: float
         step: float
@@ -424,7 +578,7 @@ def _toolbox(context: Any, w: float, h: float) -> None:
             1 / factor,
             "pressure_size",
         )
-        if state.tool in ("paint", "grease"):
+        if state.tool == "paint":
             y = _slider("hardness", "Hardness", brush.hardness * 100, x, y, width, 0, 100, 0.01, "pressure_hardness")
             y = _slider("opacity", "Opacity", brush.opacity * 100, x, y, width, 0, 100, 0.01, "pressure_opacity")
         paint.text("Shape", x, y)
@@ -445,28 +599,7 @@ def _toolbox(context: Any, w: float, h: float) -> None:
         y -= 28
         paint.text("Color", x, y)
         y -= 29
-        colors: tuple[tuple[float, float, float], ...] = (
-            (0.015, 0.015, 0.015),
-            (0.8, 0.8, 0.8),
-            (0.65, 0.06, 0.04),
-            (0.05, 0.32, 0.7),
-            (0.06, 0.45, 0.13),
-            (0.65, 0.36, 0.015),
-        )
-        color: tuple[float, float, float]
-        for index, color in enumerate(colors):
-            sw: float = width / 6 - 3
-            paint.rect(x + index * (width / 6), y, sw, 22, (*color, 1), 3)
-            _CURRENT.append(
-                Widget(
-                    "brush_color_" + str(index),
-                    (x + index * (width / 6), y, sw, 22),
-                    "brush",
-                    ("color", color),
-                    tooltip="Brush color",
-                )
-            )
-        y -= 34
+        y = _swatches(x, y, width, "brush", "Brush color")
         paint.text("Method", x, y)
         y -= 30
         _checkbox(
@@ -475,7 +608,13 @@ def _toolbox(context: Any, w: float, h: float) -> None:
         y -= 28
     elif state.tool in ("move", "rotate", "scale"):
         obj = context.view_layer.objects.active
-        if obj is None or not obj.select_get():
+        if pencil.editing(context):
+            paint.text("Selected strokes", x, y, 14)
+            y -= 24
+            paint.text("Use the gizmo or G / R / S", x, y, 11, max_width=width)
+            y -= 24
+            paint.text("Esc: finish transforming", x, y, 11, max_width=width)
+        elif obj is None or not obj.select_get():
             paint.text("Select an object", x, y, color=paint.MUTED, max_width=width)
         else:
             kind: str = {"move": "location", "rotate": "rotation", "scale": "scale"}[state.tool]
@@ -505,6 +644,15 @@ def _toolbox(context: Any, w: float, h: float) -> None:
             (0.50, 0.50, 0.50, 0.7),
             1,
         )
+
+
+def _selection_outline(x: float, y: float, w: float, h: float) -> None:
+    paint.line(
+        [(x, y), (x + w, y), (x + w, y + h), (x, y + h)],
+        color=(1.0, 0.45, 0.05, 1.0),
+        width=1.5,
+        closed=True,
+    )
 
 
 def _layers(context: Any, w: float, h: float) -> None:
@@ -539,8 +687,8 @@ def _layers(context: Any, w: float, h: float) -> None:
             key: str = str(row.key)
             if row.active:
                 paint.rect(5, y, w - 10, 28, (0.12, 0.36, 0.12, 1) if row.kind == "Group" else (0.27, 0.17, 0.23, 1))
-            elif _SELECTED_LAYER == key:
-                paint.rect(5, y, w - 10, 28, (0.20, 0.29, 0.38, 1))
+            if row.selected:
+                _selection_outline(6, y + 1, w - 12, 26)
             left: float = 10 + int(row.depth) * 12
             if row.kind in ("Group", "Stroke Layer"):
                 paint.text("+" if key in _COLLAPSED else "-", left, y + 8)
@@ -560,6 +708,8 @@ def _layers(context: Any, w: float, h: float) -> None:
             paint.text(str(row.kind), type_x, y + 8, max_width=max(20, w - 87 - type_x))
             operation: str
             for index, operation in enumerate(("visible", "lock", "active")):
+                if key.startswith("stroke:"):
+                    continue
                 if key == "ground" and operation != "active":
                     continue
                 if operation == "active" and row.kind not in ("Plane", "Group"):
@@ -605,6 +755,8 @@ def _stage(context: Any, w: float, top: float) -> None:
     objects: list[tuple[Any, int]] = []
 
     def visit(obj: Any, depth: int) -> None:
+        if obj.type == "GREASEPENCIL":
+            return
         if not _SEARCH or _SEARCH.lower() in str(obj.name).lower():
             objects.append((obj, depth))
         if "obj:" + str(obj.name) not in _COLLAPSED or _SEARCH:
@@ -622,7 +774,7 @@ def _stage(context: Any, w: float, top: float) -> None:
         if 5 <= y <= top - 87:
             name: str = str(obj.name)
             if obj.select_get():
-                paint.rect(8, y, w - 16, 27, (0.18, 0.28, 0.37, 1))
+                _selection_outline(9, y + 1, w - 18, 25)
             left: float = 12 + depth * 12
             if len(obj.children):
                 paint.text("+" if "obj:" + name in _COLLAPSED else "-", left, y + 8)
@@ -660,16 +812,17 @@ def _stage(context: Any, w: float, top: float) -> None:
 
 
 def _viewport(context: Any, w: float, h: float) -> None:
+    from ..tools.pipe_fill import message
+
     state: AppState = get_state()
     y: float = h - 34
-    _button("frame", "Frame", 8, y, 50, "frame", tooltip="Frame selected objects")
     widths: tuple[float, ...] = (142, 30, 78, 42, 32)
-    x: float = max(64, w - sum(widths) - 33)
-    if x >= 170:
+    x: float = max(8, w - sum(widths) - 33)
+    if x >= 114:
         _button(
             "projection",
             "Perspective" if context.space_data.region_3d.view_perspective == "PERSP" else "Orthographic",
-            64,
+            8,
             y,
             98,
             "popup",
@@ -728,8 +881,9 @@ def _viewport(context: Any, w: float, h: float) -> None:
         [("Light mode", "theme", "light"), ("Dark mode", "theme", "dark")],
         tooltip="Lighting",
     )
-    if state.status:
-        paint.text(state.status, 155, 14, 12, color=(0.7, 0.72, 0.75, 1), max_width=w - 180)
+    status: str = message() or state.status
+    if status:
+        paint.text(status, 155, 14, 12, color=(0.7, 0.72, 0.75, 1), max_width=w - 180)
 
 
 def _popup(w: float, h: float) -> None:
@@ -945,7 +1099,7 @@ def handle_event(context: Any, event: Any) -> bool:
     if rename_requested and widget is not None:
         if widget.action in ("layer", "object") and isinstance(widget.payload, tuple) and widget.payload[0] == "select":
             key: str = str(widget.payload[1])
-            if key != "ground":
+            if key != "ground" and not key.startswith("stroke:"):
                 cancel_capture()
                 menus.rename(widget.action, key, widget.tooltip)
                 return True
@@ -983,9 +1137,12 @@ def handle_event(context: Any, event: Any) -> bool:
                 key: str = str(widget.payload)
                 _COLLAPSED.symmetric_difference_update({key})
             else:
+                payload: object = widget.payload
                 if widget.action == "layer" and isinstance(widget.payload, tuple) and widget.payload[0] == "select":
                     _SELECTED_LAYER = str(widget.payload[1])
-                _emit(widget.action, widget.payload)
+                    if _SELECTED_LAYER.startswith("stroke:") and (event.shift or event.ctrl):
+                        payload = ("select_extend", _SELECTED_LAYER)
+                _emit(widget.action, payload)
             layout.redraw(context)
             return True
     return panel or widget is not None or (name == "viewport" and y >= region.height / scale - 38)

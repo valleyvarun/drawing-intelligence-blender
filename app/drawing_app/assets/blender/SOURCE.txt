@@ -1,0 +1,27 @@
+Blender toolbar icons, copied unchanged from:
+C:\blender\release\datafiles\icons
+
+Local checkout HEAD: ded7fde71c04f034d6c065e8d0a75d9f548003a0
+
+Move:   ops.transform.translate.dat
+Rotate: ops.transform.rotate.dat
+Scale:  ops.transform.resize.dat
+Grease Pencil: ops.gpencil.draw.dat
+Erase: brush.gpencil_draw.erase.dat
+Fill: brush.gpencil_draw.fill.dat
+Trim: ops.gpencil.stroke_trim.dat
+Line: ops.gpencil.primitive_line.dat
+Polyline: ops.gpencil.primitive_polyline.dat
+Arc: ops.gpencil.primitive_arc.dat
+Curve: ops.gpencil.primitive_curve.dat
+Box: ops.gpencil.primitive_box.dat
+Circle: ops.gpencil.primitive_circle.dat
+Eyedropper: ops.paint.eyedropper_add.dat
+Select strokes: ops.generic.select_box.dat
+
+Blender Authors. Blender is distributed under the GNU GPL.
+The license text copied from C:\blender\doc\license\GPL-license.txt
+is included in this directory.
+
+These are original VCO triangle assets. The application reads their
+coordinates and colors directly; no icon geometry has been redrawn.

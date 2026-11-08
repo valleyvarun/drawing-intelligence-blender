@@ -22,6 +22,7 @@ class LayerRow:
     visible: bool
     locked: bool
     active: bool
+    selected: bool = False
 
 
 def _context(context: Any = None) -> Any:
@@ -116,7 +117,6 @@ def create_plane(context: Any) -> Any:
         obj.location = context.scene.cursor.location
     material: Any = bpy.data.materials.new("Drawing Plane Purple")
     material.diffuse_color = obj.color
-    material.use_nodes = True
     shader: Any = material.node_tree.nodes.get("Principled BSDF")
     shader.inputs["Base Color"].default_value = obj.color
     shader.inputs["Alpha"].default_value = 0.28
@@ -169,6 +169,8 @@ def object_locked(context: Any, obj: Any) -> bool:
 
 
 def layer_rows(context: Any = None) -> list[LayerRow]:
+    from . import pencil
+
     ctx: Any = _context(context)
     ensure_scene(ctx)
     rows: list[LayerRow] = [
@@ -199,6 +201,11 @@ def layer_rows(context: Any = None) -> list[LayerRow]:
             emit(child, depth + 1, locked, hidden)
         obj: Any
         for obj in collection.objects:
+            visible: bool = not hidden and not obj.hide_get()
+            object_lock: bool = locked or bool(obj.hide_select)
+            if obj.type == "GREASEPENCIL":
+                rows.extend(pencil.stroke_rows(obj, depth + 1, visible, object_lock))
+                continue
             label: str = "Plane" if obj.get(PLANE) else "Stroke" if obj.get("drawing_stroke") else obj.type.title()
             rows.append(
                 LayerRow(
@@ -206,9 +213,10 @@ def layer_rows(context: Any = None) -> list[LayerRow]:
                     obj.name,
                     label,
                     depth + 1,
-                    not hidden and not obj.hide_get(),
-                    locked or bool(obj.hide_select),
-                    obj.name == get_state().active_plane if obj.get(PLANE) else obj.select_get(),
+                    visible,
+                    object_lock,
+                    bool(obj.get(PLANE)) and obj.name == get_state().active_plane,
+                    bool(obj.select_get()),
                 )
             )
 
