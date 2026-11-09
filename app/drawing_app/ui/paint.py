@@ -17,6 +17,7 @@ FIELD: Color = (0.125, 0.135, 0.14, 1.0)
 BUTTON: Color = (0.16, 0.16, 0.16, 1.0)
 SELECTED: Color = (0.16, 0.37, 0.55, 1.0)
 _SHADER: Any = None
+_SMOOTH_SHADER: Any = None
 _ICON_SHADER: Any = None
 _ICON_BATCHES: dict[str, Any] = {}
 _BLENDER_ICONS: dict[str, str] = {
@@ -33,6 +34,9 @@ _BLENDER_ICONS: dict[str, str] = {
     "builtin.curve": "ops.gpencil.primitive_curve.dat",
     "builtin.box": "ops.gpencil.primitive_box.dat",
     "builtin.circle": "ops.gpencil.primitive_circle.dat",
+    # Built by scripts/build_app_icons.py in the box icon's colour and line width.
+    "shape": "app.shape.dat",
+    "printer": "app.printer.dat",
     "builtin.eyedropper": "ops.paint.eyedropper_add.dat",
 }
 _IMAGES: dict[str, Any] = {}
@@ -62,6 +66,52 @@ def measure(label: str, size: float = 13.0) -> float:
     return float(blf.dimensions(font, label)[0]) / _TEXT_SCALE
 
 
+def _fit(label: str, start: int, end: int, width: float, size: float) -> int:
+    """End of the longest prefix of label[start:end] that fits `width` (at least one character)."""
+    low: int = start + 1
+    high: int = end
+    while low < high:
+        middle: int = (low + high + 1) // 2
+        if measure(label[start:middle], size) <= width:
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
+def wrap(label: str, width: float, size: float = 13.0) -> list[tuple[int, int]]:
+    """Visual lines of `label` as (start, end) offsets: words wrap within `width`; newlines always break."""
+    spans: list[tuple[int, int]] = []
+    space: float = measure(" ", size)
+    paragraph: int = 0
+    while True:
+        newline: int = label.find("\n", paragraph)
+        end: int = len(label) if newline < 0 else newline
+        start: int = paragraph
+        used: float = 0.0
+        cursor: int = paragraph
+        while cursor < end:
+            gap: int = label.find(" ", cursor, end)
+            word_end: int = end if gap < 0 else gap
+            word: float = measure(label[cursor:word_end], size) if word_end > cursor else 0.0
+            if used > 0.0 and used + word > width:
+                spans.append((start, cursor))
+                start = cursor
+                used = 0.0
+            # A word wider than the line breaks between characters.
+            while word > width and word_end - cursor > 1:
+                cut: int = _fit(label, cursor, word_end, width, size)
+                spans.append((cursor, cut))
+                cursor = start = cut
+                word = measure(label[cursor:word_end], size)
+            used += word + (space if gap >= 0 else 0.0)
+            cursor = word_end + (1 if gap >= 0 else 0)
+        spans.append((start, end))
+        if newline < 0:
+            return spans
+        paragraph = newline + 1
+
+
 def _shader() -> Any:
     global _SHADER
     if _SHADER is None:
@@ -81,6 +131,22 @@ def polygon(points: list[Point], color: Color) -> None:
     shader.bind()
     shader.uniform_float("color", color)
     batch.draw(shader)
+
+
+def gradient(points: list[Point], colors: list[Color]) -> None:
+    """Convex polygon whose corner colours blend across it."""
+    global _SMOOTH_SHADER
+    if len(points) < 3 or len(colors) != len(points):
+        return
+    if _SMOOTH_SHADER is None:
+        _SMOOTH_SHADER = gpu.shader.from_builtin("SMOOTH_COLOR")
+    indices: list[tuple[int, int, int]] = []
+    index: int
+    for index in range(1, len(points) - 1):
+        indices.append((0, index, index + 1))
+    batch: Any = batch_for_shader(_SMOOTH_SHADER, "TRIS", {"pos": points, "color": colors}, indices=indices)
+    _SMOOTH_SHADER.bind()
+    batch.draw(_SMOOTH_SHADER)
 
 
 def rect(x: float, y: float, w: float, h: float, color: Color, radius: float = 0.0) -> None:
@@ -303,8 +369,9 @@ def invalidate_images() -> None:
 
 
 def release() -> None:
-    global _SHADER, _ICON_SHADER, _FONT, _FONT_PATH
+    global _SHADER, _SMOOTH_SHADER, _ICON_SHADER, _FONT, _FONT_PATH
     _SHADER = None
+    _SMOOTH_SHADER = None
     _ICON_SHADER = None
     _ICON_BATCHES.clear()
     _IMAGES.clear()

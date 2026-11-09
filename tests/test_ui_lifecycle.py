@@ -322,7 +322,8 @@ def verify_group_rename() -> None:
 
 
 def open_object_rename() -> None:
-    rename_item("object_" + OBJECT_NAME)
+    # Objects are listed in the layers tree; the panel below it is the Claude Code chat.
+    rename_item("layer_select_object:" + OBJECT_NAME)
 
 
 def verify_object_rename() -> None:
@@ -331,18 +332,18 @@ def verify_object_rename() -> None:
     assert bpy.data.objects.get(OBJECT_NAME) is None
     OBJECT_NAME = "LifecycleCubeRenamed"
     REPORT["native_object_rename_dialog"] = True
-    click("object_lock_" + OBJECT_NAME)
+    click("layer_lockobject:" + OBJECT_NAME)
 
 
 def verify_object_locked() -> None:
     assert cube().hide_select and not cube().select_get()
-    click("object_lock_" + OBJECT_NAME)
+    click("layer_lockobject:" + OBJECT_NAME)
 
 
 def verify_object_unlocked() -> None:
     assert not cube().hide_select
-    click("object_" + OBJECT_NAME)
-    REPORT["native_stage_object_lock"] = True
+    click("layer_select_object:" + OBJECT_NAME)
+    REPORT["native_layer_object_lock"] = True
 
 
 def layer_click(operation: str) -> Callable[[], None]:

@@ -4,14 +4,26 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from .blender import bpy
-from .state import ROOT, get_state, restore_brushes, restore_pencil
+from .state import ROOT, get_state, restore_brushes, restore_pencil, restore_printer
 
 SCENE_STATE: str = "drawing_app_state"
+# Blender writes compressed .blend files as Zstandard frames.
+ZSTD_MAGIC: bytes = b"\x28\xb5\x2f\xfd"
+# Windows, workspaces and screens; libraries are written with the data linked from them.
+INTERFACE_TYPES: tuple[Any, ...] = (
+    bpy.types.WindowManager,
+    bpy.types.WorkSpace,
+    bpy.types.Screen,
+    bpy.types.Library,
+)
+_STARTUP_FILE: bool = False
 
 
 class DRAWING_OT_new_project(bpy.types.Operator):
@@ -54,6 +66,10 @@ class DRAWING_OT_new_project(bpy.types.Operator):
 
 def persist_scene() -> None:
     data: dict[str, object] = asdict(get_state())
+    # Personal agent settings stay in local preferences, not in drawings that may be shared.
+    key: str
+    for key in ("agent_cli", "agent_model", "agent_mode", "agent_effort"):
+        data.pop(key, None)
     if not bpy.app.background:
         from ..ui.layout import role
 
@@ -124,8 +140,61 @@ def restore_scene() -> None:
             get_state().cursor_side = int(data["cursor_side"])
         restore_brushes(data.get("brushes"))
         restore_pencil(data.get("pencil"))
+        restore_printer(data.get("printer"))
     except (ValueError, TypeError, AttributeError):
         get_state().status = "Project drawing preferences could not be restored."
+
+
+def drawing_data() -> set[Any]:
+    """Every data-block a native save writes, except the application's editor layout."""
+    blocks: set[Any] = set()
+    item: Any
+    for item in bpy.data.user_map():
+        if not (item.is_embedded_data or item.is_runtime_data or isinstance(item, INTERFACE_TYPES)):
+            blocks.add(item)
+    return blocks
+
+
+def write_without_interface(path: Path) -> None:
+    """Rewrite a saved drawing without windows, workspaces or screens.
+
+    Blender then opens it like a library file and keeps its own layout instead of the
+    application's three-editor screen. The native save has already set the file path,
+    backup, relative paths and dirty state; this pass replaces only the file's contents.
+    """
+    with path.open("rb") as handle:
+        compress: bool = handle.read(len(ZSTD_MAGIC)) == ZSTD_MAGIC
+    bpy.data.libraries.write(str(path), drawing_data(), path_remap="RELATIVE", compress=compress)
+
+
+@contextmanager
+def startup_file() -> Iterator[None]:
+    """Saves here write the application's startup file: its editor layout, without drawing state."""
+    global _STARTUP_FILE
+    previous: bool = _STARTUP_FILE
+    _STARTUP_FILE = True
+    try:
+        yield
+    finally:
+        _STARTUP_FILE = previous
+
+
+def saving_startup_file() -> bool:
+    return _STARTUP_FILE
+
+
+@bpy.app.handlers.persistent
+def _save_post(filepath: str) -> None:
+    """Covers every save path: menus, Ctrl+S, the quit prompt, and scripts."""
+    if _STARTUP_FILE or not filepath:
+        return
+    error: OSError | RuntimeError | ReferenceError | TypeError | ValueError
+    try:
+        write_without_interface(Path(filepath))
+    except (OSError, RuntimeError, ReferenceError, TypeError, ValueError) as error:
+        # The native save succeeded; Blender would still open it with the application's layout.
+        get_state().status = f"Saved with the app layout included: {error}"
+        print(get_state().status)
 
 
 class DRAWING_OT_save_project(bpy.types.Operator):
@@ -220,9 +289,14 @@ def register() -> None:
                 options={"HIDDEN"},
             )
         bpy.utils.register_class(cls)
+    # First, so translucent fills are still in their saved state (see viewport/fills.py).
+    if _save_post not in bpy.app.handlers.save_post:
+        bpy.app.handlers.save_post.insert(0, _save_post)
 
 
 def unregister() -> None:
+    if _save_post in bpy.app.handlers.save_post:
+        bpy.app.handlers.save_post.remove(_save_post)
     cls: Any
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

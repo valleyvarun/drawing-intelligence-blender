@@ -11,11 +11,84 @@ from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
 Vec3: TypeAlias = tuple[float, float, float]
-Tool: TypeAlias = Literal["select", "move", "rotate", "scale", "paint", "pipe", "grease"]
+Tool: TypeAlias = Literal["select", "move", "rotate", "scale", "paint", "pipe", "printer", "grease"]
+TOOLS: tuple[str, ...] = ("select", "move", "rotate", "scale", "paint", "pipe", "printer", "grease")
+# Tools with their own brush and colour.
+DRAWING_TOOLS: tuple[str, ...] = ("paint", "pipe", "printer", "grease")
 ROOT: Path = Path(__file__).resolve().parents[3]
 CONFIG: Path = (ROOT / os.environ.get("DRAWING_APP_CONFIG", "runtime/config")).resolve()
 if not CONFIG.is_relative_to(ROOT):
     CONFIG = ROOT / "runtime/config"
+
+
+# Drawing colours are stored linear, like Blender materials; pickers show sRGB.
+def srgb_to_linear(color: Vec3) -> Vec3:
+    channels: list[float] = []
+    value: float
+    for value in color:
+        value = max(0.0, min(1.0, value))
+        channels.append(value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4)
+    return channels[0], channels[1], channels[2]
+
+
+def linear_to_srgb(color: Vec3) -> Vec3:
+    channels: list[float] = []
+    value: float
+    for value in color:
+        value = max(0.0, min(1.0, value))
+        channels.append(value * 12.92 if value <= 0.0031308 else 1.055 * value ** (1.0 / 2.4) - 0.055)
+    return channels[0], channels[1], channels[2]
+
+
+def color_hex(color: Vec3) -> str:
+    """Six-digit sRGB hex of a linear colour, without '#'."""
+    text: str = ""
+    value: float
+    for value in linear_to_srgb(color):
+        text += f"{round(value * 255):02X}"
+    return text
+
+
+def parse_hex(text: str) -> Vec3 | None:
+    """Linear colour from 'RRGGBB' or 'RGB' sRGB hex (an optional '#' is ignored)."""
+    digits: str = text.strip().removeprefix("#")
+    character: str
+    if len(digits) == 3:
+        doubled: str = ""
+        for character in digits:
+            doubled += character * 2
+        digits = doubled
+    if len(digits) != 6:
+        return None
+    for character in digits:
+        if character not in "0123456789abcdefABCDEF":
+            return None
+    channels: list[float] = []
+    index: int
+    for index in (0, 2, 4):
+        channels.append(int(digits[index : index + 2], 16) / 255.0)
+    return srgb_to_linear((channels[0], channels[1], channels[2]))
+
+
+def clean_color(value: object) -> Vec3 | None:
+    """A finite three-channel colour clamped to 0..1, or None."""
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return None
+    channels: list[float] = []
+    component: object
+    for component in value:
+        if not isinstance(component, (float, int)) or isinstance(component, bool) or not math.isfinite(component):
+            return None
+        channels.append(max(0.0, min(1.0, float(component))))
+    return channels[0], channels[1], channels[2]
+
+
+NAVIGATION_MODES: tuple[str, ...] = ("orbit", "fly", "walk")
+# Walk settings' ranges in metres: walk_speed per second, eye_level above the surface below.
+WALK_LIMITS: dict[str, tuple[float, float]] = {"walk_speed": (0.1, 20.0), "eye_level": (0.1, 10.0)}
+
+# Purple #70197C (sRGB 112, 25, 124): every drawing tool's colour when the app opens.
+DEFAULT_COLOR: Vec3 = srgb_to_linear((0x70 / 255, 0x19 / 255, 0x7C / 255))
 
 
 @dataclass
@@ -24,14 +97,45 @@ class Brush:
     hardness: float = 1.0
     opacity: float = 1.0
     shape: str = "circle"
-    color: Vec3 = (0.015, 0.015, 0.015)
+    color: Vec3 = DEFAULT_COLOR
     pressure_size: bool = False
     pressure_hardness: bool = False
     pressure_opacity: bool = False
 
 
 def _brushes() -> dict[str, Brush]:
-    return {"paint": Brush(), "pipe": Brush(), "grease": Brush()}
+    # The 3D Printer's radius is its nozzle's: particles fall within that circle.
+    return {"paint": Brush(), "pipe": Brush(), "printer": Brush(radius=0.03), "grease": Brush()}
+
+
+# 3D Printer settings' ranges: particles per second and per drop, particle size and drop height in metres.
+# A particle is never wider than the nozzle, so its size is also capped at the nozzle's diameter.
+PRINTER_LIMITS: dict[str, tuple[float, float]] = {
+    "rate": (1.0, 2000.0),
+    "per_drop": (1.0, 500.0),
+    "size": (0.001, 20.0),
+    "drop": (0.0, 2.0),
+}
+# The nozzle's radius in metres; the largest pours over a 20 m circle.
+NOZZLE_LIMITS: tuple[float, float] = (0.002, 10.0)
+
+
+@dataclass
+class Printer:
+    """3D Printer pouring: particles per second, how many fall at once, and the release height above the surface.
+
+    `rate` replaced an earlier `flow` share; saved preferences that only have `flow` start from these defaults.
+    """
+
+    rate: float = 200.0
+    per_drop: int = 1
+    # Each particle is a block this wide; it adds about its own height where it lands.
+    size: float = 0.02
+    drop: float = 0.15
+
+    def particle(self, radius: float) -> float:
+        """The particle size in use with a nozzle of this radius: never wider than the nozzle."""
+        return min(self.size, 2.0 * radius)
 
 
 @dataclass
@@ -39,9 +143,12 @@ class Pencil:
     """Native Grease Pencil choices; radius and strength stay on Blender's brush assets."""
 
     tool: str = "builtin.brush"
+    # The Shape tool's last choice: Blender's box or circle primitive.
+    shape: str = "builtin.box"
     brush: str = "Pencil"
     eraser: str = "Eraser Hard"
-    material: str = "Black"
+    # Label of the last applied colour material: a preset name or "#RRGGBB".
+    material: str = "#" + color_hex(DEFAULT_COLOR)
     fill_opacity: float = 1.0
     # Blender's defaults: strokes at the object origin, on a plane facing the view.
     placement: str = "ORIGIN"
@@ -53,8 +160,12 @@ class AppState:
     tool: Tool = "select"
     theme: str = "light"
     units: str = "m"
+    # Right-drag navigation: "orbit", "fly", or "walk".
     navigation: str = "orbit"
     zoom_speed: float = 1.0
+    # Walk navigation, in metres: speed per second and eye height above the surface below.
+    walk_speed: float = 1.5
+    eye_level: float = 1.6
     ruler: bool = True
     hud: bool = False
     fps_limit: int = 60
@@ -68,14 +179,25 @@ class AppState:
     cursor_side: int = 1
     active_plane: str = "Ground Plane"
     active_group: str = "Default Drawing"
+    # Tool Box colour; setting it recolours every drawing tool.
+    color: Vec3 = DEFAULT_COLOR
     brushes: dict[str, Brush] = field(default_factory=_brushes)
     pencil: Pencil = field(default_factory=Pencil)
+    printer: Printer = field(default_factory=Printer)
     status: str = ""
     left_width: int = 220
     right_width: int = 280
     # Window position and size in Blender's coordinates (x, y, width, height); maximized by default.
     window_geometry: tuple[int, int, int, int] | None = None
     window_maximized: bool = True
+    # Claude Code executable chosen in the chat panel; empty finds it automatically.
+    agent_cli: str = ""
+    # Chat model alias, permission mode, and effort; empty values follow Claude Code's own settings.
+    agent_model: str = ""
+    agent_mode: str = ""
+    agent_effort: str = ""
+    # Clayers' share of the right panel's height; the chat below gets the rest.
+    layers_share: float = 1.0 / 3.0
 
     @property
     def brush(self) -> Brush:
@@ -133,7 +255,7 @@ def load_preferences() -> None:
         choices: dict[str, tuple[str, ...]] = {
             "theme": ("light", "dark"),
             "units": ("m", "mm"),
-            "navigation": ("orbit", "fly"),
+            "navigation": NAVIGATION_MODES,
         }
         for name in choices:
             value: object = data.get(name)
@@ -142,6 +264,11 @@ def load_preferences() -> None:
         speed: object = data.get("zoom_speed")
         if isinstance(speed, (float, int)) and math.isfinite(speed):
             _STATE.zoom_speed = max(0.1, min(10.0, float(speed)))
+        limits: tuple[float, float]
+        for name, limits in WALK_LIMITS.items():
+            value = data.get(name)
+            if isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value):
+                setattr(_STATE, name, max(limits[0], min(limits[1], float(value))))
         for name in ("ruler", "hud"):
             value = data.get(name)
             if isinstance(value, bool):
@@ -154,8 +281,20 @@ def load_preferences() -> None:
         limit: object = data.get("fps_limit")
         if isinstance(limit, int) and limit in (0, 30, 60, 120):
             _STATE.fps_limit = limit
-        restore_brushes(data.get("brushes"))
+        cli: object = data.get("agent_cli")
+        if isinstance(cli, str) and len(cli) < 1024:
+            _STATE.agent_cli = cli
+        for name in ("agent_model", "agent_mode", "agent_effort"):
+            value = data.get(name)
+            if isinstance(value, str) and len(value) <= 64 and value.replace("-", "").replace("_", "").isalnum():
+                setattr(_STATE, name, value)
+        share: object = data.get("layers_share")
+        if isinstance(share, (float, int)) and not isinstance(share, bool) and 0.1 <= share <= 0.9:
+            _STATE.layers_share = float(share)
+        # Colours start at DEFAULT_COLOR on every launch; saved drawings restore their own.
+        restore_brushes(data.get("brushes"), colors=False)
         restore_pencil(data.get("pencil"))
+        restore_printer(data.get("printer"))
         restore_window(data.get("window_geometry"), data.get("window_maximized"))
     except (OSError, ValueError, TypeError):
         _STATE.status = "Saved preferences could not be read; using defaults."
@@ -176,6 +315,19 @@ def restore_window(geometry: object, maximized: object) -> None:
         _STATE.window_geometry = (values[0], values[1], values[2], values[3])
 
 
+def restore_printer(payload: object) -> None:
+    if not isinstance(payload, dict):
+        return
+    data: dict[str, object] = cast(dict[str, object], payload)
+    name: str
+    limits: tuple[float, float]
+    for name, limits in PRINTER_LIMITS.items():
+        value: object = data.get(name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            bounded: float = max(limits[0], min(limits[1], float(value)))
+            setattr(_STATE.printer, name, round(bounded) if name == "per_drop" else bounded)
+
+
 def restore_pencil(payload: object) -> None:
     if not isinstance(payload, dict):
         return
@@ -186,6 +338,9 @@ def restore_pencil(payload: object) -> None:
         value: object = data.get(name)
         if isinstance(value, str) and 0 < len(value) <= 64:
             setattr(pencil, name, value)
+    shape: object = data.get("shape")
+    if shape in ("builtin.box", "builtin.circle"):
+        pencil.shape = str(shape)
     opacity: object = data.get("fill_opacity")
     if isinstance(opacity, (int, float)) and math.isfinite(opacity):
         pencil.fill_opacity = max(0.0, min(1.0, float(opacity)))
@@ -197,12 +352,13 @@ def restore_pencil(payload: object) -> None:
         pencil.plane = str(choice)
 
 
-def restore_brushes(payload: object) -> None:
+def restore_brushes(payload: object, *, colors: bool = True) -> None:
+    """Brush settings from preferences or a drawing; `colors=False` keeps the current colours."""
     if not isinstance(payload, dict):
         return
     brushes: dict[str, object] = cast(dict[str, object], payload)
     kind: str
-    for kind in ("paint", "pipe", "grease"):
+    for kind in DRAWING_TOOLS:
         raw: object = brushes.get(kind)
         if not isinstance(raw, dict):
             continue
@@ -222,14 +378,6 @@ def restore_brushes(payload: object) -> None:
         shape: object = data.get("shape")
         if shape in ("circle", "square", "triangle"):
             brush.shape = str(shape)
-        color: object = data.get("color")
-        if isinstance(color, (list, tuple)) and len(color) == 3:
-            values: list[object] = list(color)
-            normalized: list[float] = []
-            component: object
-            for component in values:
-                if not isinstance(component, (float, int)) or not math.isfinite(component):
-                    break
-                normalized.append(max(0.0, min(1.0, float(component))))
-            if len(normalized) == 3:
-                brush.color = (normalized[0], normalized[1], normalized[2])
+        color: Vec3 | None = clean_color(data.get("color")) if colors else None
+        if color is not None:
+            brush.color = color

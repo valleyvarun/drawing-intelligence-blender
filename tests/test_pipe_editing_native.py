@@ -443,7 +443,8 @@ def run() -> dict[str, object]:
             translucent: Any = native_pencil.active_material
             translucent_index: int = native_pencil.active_material_index
             assert abs(translucent.grease_pencil.fill_color[3] - 0.65) < 1e-6
-            assert pencil.material_slot(native_pencil, get_state().pencil.material, True) == translucent_index
+            fill_color: Vec3 = get_state().brushes["grease"].color
+            assert pencil.material_slot(native_pencil, fill_color, True) == translucent_index
             pencil.command(bpy.context, "fill_opacity", 0.4)
             assert native_pencil.active_material != translucent
             assert abs(native_pencil.active_material.grease_pencil.fill_color[3] - 0.4) < 1e-6

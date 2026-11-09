@@ -57,6 +57,24 @@ def object_hit(context: Any, origin: Any, direction: Any) -> Hit | None:
     return None
 
 
+def plane_under(context: Any, origin: Any, direction: Any) -> Any:
+    """The drawing plane first along the ray, or None when another object is in front of it."""
+    depsgraph: Any = context.evaluated_depsgraph_get()
+    start: Any = origin.copy()
+    _attempt: int
+    for _attempt in range(32):
+        result: Any = context.scene.ray_cast(depsgraph, start, direction)
+        if not result[0]:
+            return None
+        obj: Any = result[4]
+        if obj.get("drawing_plane"):
+            return obj
+        if not obj.get("drawing_preview") and not obj.get("drawing_helper"):
+            return None
+        start = result[1] + direction * 1e-5
+    return None
+
+
 def hit(context: Any, event: Any, area: Any, region: Any, placing: bool = False) -> Hit | None:
     state: AppState = get_state()
     origin: Any

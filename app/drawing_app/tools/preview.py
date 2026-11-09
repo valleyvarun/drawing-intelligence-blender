@@ -70,7 +70,7 @@ class BrushPreview:
     def _draw(self) -> None:
         if bpy.context.area != self._area or bpy.context.region != self._region:
             return
-        if get_state().tool not in ("paint", "pipe") and not get_state().cursor_placing:
+        if get_state().tool not in ("paint", "pipe", "printer") and not get_state().cursor_placing:
             return
         depth: str = str(gpu.state.depth_test_get())
         mask: bool = bool(gpu.state.depth_mask_get())

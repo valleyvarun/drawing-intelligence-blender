@@ -264,6 +264,13 @@ def main() -> None:
         negative = negative or label.text.startswith("-")
         assert label.text != "0"
     assert negative
+    # Away from world 0, the zero coordinate is labelled; only the ruler centre is skipped.
+    offset_origin: tuple[float, float, float] = (0.3, 0.3, 0.0)
+    offset_labels: list[Label] = _labels(context, fake_area, region, offset_origin, 1.0)
+    offset_label: Label
+    assert any(offset_label.text == "0" for offset_label in offset_labels)
+    for offset_label in offset_labels:
+        assert offset_label.position != offset_origin
     REPORT["world_signed_labels_without_origin_zero"] = True
     rv3d.view_perspective = "PERSP"
     rv3d.view_rotation = Vector((1.0, -1.0, 1.0)).to_track_quat("Z", "Y")

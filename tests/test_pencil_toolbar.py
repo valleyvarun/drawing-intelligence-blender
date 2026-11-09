@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import math
 import sys
 import unittest
 from collections.abc import Callable
@@ -44,6 +46,8 @@ class PencilToolbarTests(unittest.TestCase):
         setattr(blender, "view3d_utils", MagicMock())
         tools: ModuleType = ModuleType("_toolbar.tools")
         setattr(tools, "layers", MagicMock())
+        # The 3D Printer's own tests cover it; stopping a session only shuts it down.
+        setattr(tools, "printer", MagicMock())
         self.tools_module: ModuleType = tools
         viewport: ModuleType = ModuleType("_toolbar.viewport")
         self.viewport_module: ModuleType = viewport
@@ -87,9 +91,26 @@ class PencilToolbarTests(unittest.TestCase):
         self.bpy.types.Operator = type("Operator", (), {})
         ui: ModuleType = ModuleType("_toolbar.ui")
         setattr(ui, "layout", MagicMock())
+        widgets: ModuleType = module("_toolbar.ui.widgets", "app/drawing_app/ui/widgets.py")
+        setattr(ui, "widgets", widgets)
+        shortcuts: ModuleType = module("_toolbar.core.shortcuts", "app/drawing_app/core/shortcuts.py")
+        # The chat panel draws nothing here; agent tests cover the chat itself.
+        chat: MagicMock = MagicMock()
+        chat.ChatPanel.return_value.draw.return_value = []
+        setattr(ui, "chat", chat)
         modules: dict[str, ModuleType] = {}
         item: ModuleType
-        for item in (self.state_module, self.blender_module, self.tools_module, drawing, viewport, project, ui):
+        for item in (
+            self.state_module,
+            self.blender_module,
+            self.tools_module,
+            drawing,
+            viewport,
+            project,
+            shortcuts,
+            ui,
+            widgets,
+        ):
             modules[item.__name__] = item
         with patch.dict(sys.modules, modules):
             controller: ModuleType = module("_toolbar.core.controller", "app/drawing_app/core/controller.py")
@@ -285,6 +306,88 @@ class PencilToolbarTests(unittest.TestCase):
         self.assertEqual(len(self.strokes), 3)
         self.bpy.data.objects.new.assert_not_called()
         self.bpy.data.objects.remove.assert_not_called()
+
+    def test_clayers_take_a_third_and_the_chat_divider_resizes_and_saves(self) -> None:
+        self.load_controller()
+        self.stroke_scene()
+        ui: ModuleType = self.imports["_toolbar.ui"]
+        setattr(ui, "paint", MagicMock())
+        ui.paint.measure.return_value = 0.0
+        setattr(ui, "menus", MagicMock())
+        setattr(self.blender_module, "gpu", MagicMock())
+        region: SimpleNamespace = SimpleNamespace(type="WINDOW", x=0, y=0, width=600, height=900)
+        panel: MagicMock = MagicMock()
+        panel.x = panel.y = 0
+        panel.width, panel.height = 600, 900
+        panel.regions = [region]
+        self.bpy.context.window.screen.areas = [panel]
+        ui.layout.role.return_value = "layers"
+        with patch.dict(sys.modules, self.imports):
+            overlay: ModuleType = module("_toolbar.ui.overlay", "app/drawing_app/ui/overlay.py")
+            save: MagicMock = MagicMock()
+            setattr(overlay, "save_preferences", save)
+            overlay._layers(self.bpy.context, 600, 900)
+            widgets: dict[str, Widget] = {}
+            widget: Widget
+            for widget in overlay._CURRENT:
+                widgets[widget.key] = widget
+            # Clayers keeps the top third; the divider sits two thirds of the way up.
+            divider: Widget = widgets["panel_divider"]
+            self.assertAlmostEqual(divider.bounds[1] + 5, 600.0)
+            overlay._WIDGETS[int(panel.as_pointer())] = list(overlay._CURRENT)
+
+            def event(kind: str, value: str, y: float) -> SimpleNamespace:
+                return SimpleNamespace(type=kind, value=value, mouse_x=300, mouse_y=y, shift=False, ctrl=False)
+
+            self.assertTrue(overlay.handle_event(self.bpy.context, event("LEFTMOUSE", "PRESS", 600)))
+            self.assertEqual(overlay._DRAG.kind, "divider")
+            overlay.handle_event(self.bpy.context, event("MOUSEMOVE", "NOTHING", 450))
+            self.assertAlmostEqual(self.state.layers_share, 0.5)
+            # Clayers keeps at least 96 units and the chat at least 180.
+            overlay.handle_event(self.bpy.context, event("MOUSEMOVE", "NOTHING", 880))
+            self.assertAlmostEqual(self.state.layers_share, 96 / 900)
+            overlay.handle_event(self.bpy.context, event("MOUSEMOVE", "NOTHING", 5))
+            self.assertAlmostEqual(self.state.layers_share, 0.8)
+            save.assert_not_called()
+            overlay.handle_event(self.bpy.context, event("LEFTMOUSE", "RELEASE", 5))
+            save.assert_called_once()
+            self.assertIsNone(overlay._DRAG)
+            self.bpy.context.window.cursor_set.assert_any_call("MOVE_Y")
+            overlay._CURRENT.clear()
+            overlay._layers(self.bpy.context, 600, 900)
+            for widget in overlay._CURRENT:
+                if widget.key == "panel_divider":
+                    self.assertAlmostEqual(widget.bounds[1] + 5, 900 - 720)
+
+    def test_chat_and_panel_preferences_are_restored_and_checked(self) -> None:
+        state: ModuleType = self.state_module
+        saved: dict[str, object] = {
+            "agent_model": "sonnet",
+            "agent_mode": "acceptEdits",
+            "agent_effort": "xhigh",
+            "layers_share": 0.4,
+        }
+        rejected: dict[str, object] = {
+            "agent_model": "opus; rm -rf",
+            "agent_mode": 3,
+            "agent_effort": "x" * 80,
+            "layers_share": 2,
+        }
+        with (
+            patch.object(state.Path, "is_file", return_value=True),
+            patch.object(state.Path, "read_text", side_effect=[json.dumps(saved), json.dumps(rejected)]),
+        ):
+            state.load_preferences()
+            values: tuple[object, ...] = (
+                self.state.agent_model,
+                self.state.agent_mode,
+                self.state.agent_effort,
+                self.state.layers_share,
+            )
+            self.assertEqual(values, ("sonnet", "acceptEdits", "xhigh", 0.4))
+            state.load_preferences()
+            values = (self.state.agent_model, self.state.agent_mode, self.state.agent_effort, self.state.layers_share)
+            self.assertEqual(values, ("sonnet", "acceptEdits", "xhigh", 0.4))
 
     def test_clayers_rejects_stale_or_locked_stroke_rows(self) -> None:
         self.load_controller()
@@ -568,6 +671,49 @@ class PencilToolbarTests(unittest.TestCase):
                 self.assertEqual(self.state.tool, "grease")
                 self.assertEqual(self.state.pencil.tool, tool)
                 enter.assert_called_once()
+
+    def test_rectangle_and_ellipse_share_one_shape_button(self) -> None:
+        def buttons() -> list[tuple[str, str]]:
+            return list(self.pencil.toolbox_tools())
+
+        self.assertIn(("builtin.box", "Shape"), buttons())
+        self.assertNotIn("builtin.circle", dict(buttons()))
+        with patch.object(self.pencil, "enter"):
+            self.pencil.command(self.bpy.context, "tool", "builtin.circle")
+            self.assertEqual(self.state.pencil.shape, "builtin.circle")
+            self.assertIn(("builtin.circle", "Shape"), buttons())
+            self.assertNotIn("builtin.box", dict(buttons()))
+            # Another tool keeps the last shape for the Shape button.
+            self.pencil.command(self.bpy.context, "tool", "builtin.brush")
+            self.assertIn(("builtin.circle", "Shape"), buttons())
+        self.assertEqual(len(buttons()), len(self.pencil.DRAWING_TOOLS) - 1)
+
+    def test_shape_settings_choose_rectangle_or_ellipse(self) -> None:
+        self.load_controller()
+        ui: ModuleType = self.imports["_toolbar.ui"]
+        setattr(ui, "paint", MagicMock())
+        ui.paint.measure.return_value = 0.0
+        setattr(ui, "menus", MagicMock())
+        setattr(self.blender_module, "gpu", MagicMock())
+        view: MagicMock = MagicMock()
+        view.tool = "builtin.circle"
+        view.brushes = ()
+        view.brush = ""
+        view.material = ""
+        view.canvas = ""
+        with patch.dict(sys.modules, self.imports):
+            overlay: ModuleType = module("_toolbar.ui.overlay", "app/drawing_app/ui/overlay.py")
+            overlay._CURRENT.clear()
+            with patch.object(self.pencil, "view", return_value=view):
+                overlay._pencil(self.bpy.context, 10.0, 800.0, 180.0)
+        widget: Widget = next(item for item in overlay._CURRENT if item.key == "pencil_shape")
+        self.assertEqual(widget.action, "popup")
+        self.assertEqual(
+            widget.payload,
+            [("Rectangle", "pencil", ("tool", "builtin.box")), ("Ellipse", "pencil", ("tool", "builtin.circle"))],
+        )
+        labels: list[str] = [str(args[0]) for args, _kwargs in ui.paint.text.call_args_list]
+        self.assertIn("Shape", labels)
 
     def test_shelf_only_shows_for_draw_and_remembers_native_brush_selection(self) -> None:
         self.state.tool = "grease"
@@ -957,6 +1103,343 @@ class PencilToolbarTests(unittest.TestCase):
                 self.assertEqual("slider_fill_opacity" in keys, tool == "builtin_brush.Fill")
                 self.assertEqual("slider_strength" in keys, tool == "builtin.brush")
                 self.assertEqual("pressure_strength" in keys, tool == "builtin.brush")
+
+    def test_hex_colors_round_trip_through_linear_storage(self) -> None:
+        state: ModuleType = self.state_module
+        self.assertEqual(state.color_hex(state.parse_hex("FF8000")), "FF8000")
+        self.assertEqual(state.color_hex(state.parse_hex("#f80")), "FF8800")
+        self.assertEqual(state.color_hex((0.0, 0.0, 0.0)), "000000")
+        text: str
+        for text in ("GG0000", "12345", "", "#1234567"):
+            self.assertIsNone(state.parse_hex(text), text)
+        self.assertIsNone(state.clean_color((0.1, float("nan"), 0.2)))
+        self.assertIsNone(state.clean_color((True, 0.0, 0.0)))
+        self.assertEqual(state.clean_color([2, -1, 0.5]), (1.0, 0.0, 0.5))
+        self.assertEqual(self.pencil.color_label((0.65, 0.06, 0.04)), "Red")
+        self.assertEqual(self.pencil.color_label(state.parse_hex("FF8000")), "#FF8000")
+
+    def test_every_tool_opens_on_the_default_magenta(self) -> None:
+        state: ModuleType = self.state_module
+        default: tuple[float, float, float] = state.DEFAULT_COLOR
+        self.assertEqual(state.color_hex(default), "70197C")
+        self.assertEqual(self.state.pencil.material, "#70197C")
+        saved: dict[str, object] = {
+            "color": [0.5, 0.5, 0.5],
+            "brushes": {"grease": {"color": [0.1, 0.2, 0.3], "radius": 0.05}},
+        }
+        with (
+            patch.object(state.Path, "is_file", return_value=True),
+            patch.object(state.Path, "read_text", return_value=json.dumps(saved)),
+        ):
+            state.load_preferences()
+        # Last session's colours are not restored at launch; other brush settings are.
+        self.assertEqual(self.state.color, default)
+        name: str
+        for name in ("paint", "pipe", "grease"):
+            self.assertEqual(self.state.brushes[name].color, default)
+        self.assertEqual(self.state.brushes["grease"].radius, 0.05)
+        # Opening a saved drawing restores its own tool colours.
+        state.restore_brushes({"pipe": {"color": [0.1, 0.2, 0.3]}})
+        self.assertEqual(self.state.brushes["pipe"].color, (0.1, 0.2, 0.3))
+
+    def toolbox_widgets(self, tool: Tool, width: float) -> dict[str, Widget]:
+        """Draw the Tool Box with text measured at 7.5 px per character (13 px font)."""
+
+        def measure(label: str, size: float = 13.0) -> float:
+            return len(label) * 7.5 * size / 13.0
+
+        self.load_controller()
+        ui: ModuleType = self.imports["_toolbar.ui"]
+        self.paint: MagicMock = MagicMock()
+        setattr(ui, "paint", self.paint)
+        self.paint.measure.side_effect = measure
+        setattr(ui, "menus", MagicMock())
+        setattr(self.blender_module, "gpu", MagicMock())
+        self.bpy.context.scene.unit_settings.scale_length = 1.0
+        self.state.tool = tool
+        widgets: dict[str, Widget] = {}
+        with patch.dict(sys.modules, self.imports):
+            overlay: ModuleType = module("_toolbar.ui.overlay", "app/drawing_app/ui/overlay.py")
+            overlay._CURRENT.clear()
+            overlay._toolbox(self.bpy.context, width, 1400)
+            widget: Widget
+            for widget in overlay._CURRENT:
+                widgets[widget.key] = widget
+        self.overlay: ModuleType = overlay
+        return widgets
+
+    def test_a_chosen_tool_shows_only_its_own_color(self) -> None:
+        widgets: dict[str, Widget] = self.toolbox_widgets("select", 220)
+        self.assertIn("toolbox_hex", widgets)
+        tool: Tool
+        for tool in ("paint", "pipe", "printer"):
+            widgets = self.toolbox_widgets(tool, 220)
+            self.assertNotIn("toolbox_hex", widgets, tool)
+            self.assertIn(f"tool_{tool}_hex", widgets, tool)
+            self.assertEqual(widgets[f"tool_{tool}_hex"].prefix, ("tool",))
+
+    def test_printer_settings_send_nozzle_flow_and_drop(self) -> None:
+        widgets: dict[str, Widget] = self.toolbox_widgets("select", 220)
+        self.assertIn("tool_printer", widgets)
+        self.assertEqual((widgets["tool_printer"].action, widgets["tool_printer"].payload), ("tool", "printer"))
+        widgets = self.toolbox_widgets("printer", 220)
+        nozzle: Widget = widgets["slider_radius"]
+        self.assertEqual((nozzle.action, nozzle.prefix, nozzle.maximum, nozzle.log), ("brush", ("radius",), 10.0, True))
+        # Particles from 1 mm up to the nozzle's width (6 cm for the 3 cm radius), on a log scale.
+        size: Widget = widgets["slider_size"]
+        self.assertEqual((size.action, size.prefix, size.log), ("printer", ("size",), True))
+        self.assertEqual((size.minimum, size.value), (0.001, 0.02))
+        self.assertAlmostEqual(size.maximum, 0.06)
+        self.state.printer.size = 0.5
+        self.assertAlmostEqual(self.toolbox_widgets("printer", 220)["slider_size"].value, 0.06)
+        flow: Widget = widgets["slider_rate"]
+        self.assertEqual((flow.action, flow.prefix, flow.minimum, flow.maximum), ("printer", ("rate",), 1.0, 2000.0))
+        self.assertEqual((flow.value, flow.scale), (200.0, 1.0))
+        per_drop: Widget = widgets["slider_per_drop"]
+        self.assertEqual((per_drop.action, per_drop.prefix, per_drop.minimum), ("printer", ("per_drop",), 1.0))
+        self.assertEqual(per_drop.value, 1.0)
+        drop: Widget = widgets["slider_drop"]
+        self.assertEqual((drop.action, drop.prefix, drop.maximum), ("printer", ("drop",), 2.0))
+        # A brush shape and pressure toggles do not apply to pouring.
+        self.assertNotIn("brush_shape", widgets)
+        self.assertNotIn("pressure_radius", widgets)
+
+    def test_printer_settings_are_bounded(self) -> None:
+        controller: ModuleType = self.load_controller()
+        with patch.dict(sys.modules, self.imports):
+            controller.dispatch("printer", ("rate", 5000.0))
+            controller.dispatch("printer", ("per_drop", 2.6))
+            controller.dispatch("printer", ("drop", -1.0))
+            controller.dispatch("printer", ("flow", 1.0))
+            controller.dispatch("printer", ("drop", float("inf")))
+        self.assertEqual((self.state.printer.rate, self.state.printer.per_drop), (2000.0, 3))
+        self.assertIsInstance(self.state.printer.per_drop, int)
+        self.assertEqual(self.state.printer.drop, 0.0)
+        with patch.dict(sys.modules, self.imports):
+            controller.dispatch("printer", ("per_drop", 0))
+            controller.dispatch("printer", ("size", 50.0))
+        self.assertEqual(self.state.printer.per_drop, 1)
+        self.assertEqual(self.state.printer.size, 20.0)
+        # In use, a particle is never wider than the nozzle.
+        self.assertEqual(self.state.printer.particle(0.03), 0.06)
+        self.assertFalse(hasattr(self.state.printer, "flow"))
+
+    def test_log_sliders_space_values_by_ratio(self) -> None:
+        self.toolbox_widgets("printer", 220)
+        overlay: ModuleType = self.overlay
+        nozzle: Widget = overlay.Widget("slider_radius", (0.0, 0.0, 100.0, 24.0), minimum=0.002, maximum=10.0, log=True)
+        self.assertAlmostEqual(overlay.slider_value(nozzle, 0.0), 0.002)
+        self.assertAlmostEqual(overlay.slider_value(nozzle, 1.0), 10.0)
+        # The middle of the track is the geometric middle: 1.4 m between 2 mm and 10 m.
+        self.assertAlmostEqual(overlay.slider_value(nozzle, 0.5), math.sqrt(0.002 * 10.0))
+        value: float
+        for value in (0.002, 0.03, 0.5, 10.0):
+            fraction: float = overlay.slider_fraction(value, 0.002, 10.0, True)
+            self.assertAlmostEqual(overlay.slider_value(nozzle, fraction), value)
+        flat: Widget = overlay.Widget("slider_rate", (0.0, 0.0, 100.0, 24.0), minimum=1.0, maximum=2001.0)
+        self.assertAlmostEqual(overlay.slider_value(flat, 0.5), 1001.0)
+
+    def test_printer_preferences_from_the_flow_share_start_at_the_default_rate(self) -> None:
+        state: ModuleType = self.state_module
+        texts: list[str] = [
+            json.dumps({"printer": {"flow": 0.5, "drop": 0.3}}),
+            json.dumps({"printer": {"rate": 50, "per_drop": 7.4, "drop": 0.3}}),
+        ]
+        with (
+            patch.object(state.Path, "is_file", return_value=True),
+            patch.object(state.Path, "read_text", side_effect=texts),
+        ):
+            state.load_preferences()
+            # The old share is not read as particles per second, which would have been 1 per second.
+            self.assertEqual((self.state.printer.rate, self.state.printer.drop), (200.0, 0.3))
+            state.load_preferences()
+            self.assertEqual((self.state.printer.rate, self.state.printer.per_drop), (50.0, 7))
+
+    def test_rgb_fields_fit_three_digits_in_a_narrow_tool_box(self) -> None:
+        # 159 is a saved Tool Box width whose fields used to show "...".
+        widgets: dict[str, Widget] = self.toolbox_widgets("select", 159)
+        blue: Widget = widgets["toolbox_channel_2"]
+        self.assertLessEqual(blue.bounds[0] + blue.bounds[2], 159 - 10 + 0.01)
+        shown: dict[str, tuple[float, float]] = {}
+        args: tuple[object, ...]
+        kwargs: dict[str, object]
+        for args, kwargs in self.paint.text.call_args_list:
+            drawn: str = str(args[0])
+            size: float = cast(float, args[3]) if len(args) > 3 else 13.0
+            shown[drawn] = (size, cast(float, kwargs.get("max_width", 0.0)))
+        # The default colour's channels, each drawn whole inside its field.
+        label: str
+        for label in [str(round(c * 255)) for c in self.state_module.linear_to_srgb(self.state_module.DEFAULT_COLOR)]:
+            size, room = shown[label]
+            self.assertGreaterEqual(room, len(label) * 7.5 * size / 13.0, label)
+
+    def test_navigation_cycles_orbit_fly_walk_and_bounds_walk_settings(self) -> None:
+        controller: ModuleType = self.load_controller()
+        keymap: ModuleType = ModuleType("_toolbar.viewport.keymap")
+        setattr(keymap, "update", MagicMock())
+        setattr(self.viewport_module, "keymap", keymap)
+        self.imports[keymap.__name__] = keymap
+        self.state.navigation = "orbit"
+        seen: list[str] = []
+        with patch.dict(sys.modules, self.imports):
+            _turn: int
+            for _turn in range(4):
+                controller.dispatch("navigation", "next")
+                seen.append(self.state.navigation)
+            self.assertEqual(seen, ["fly", "walk", "orbit", "fly"])
+            self.assertEqual(self.state.status, "Navigation: Fly")
+            controller.dispatch("navigation", "walk")
+            self.assertEqual(self.state.navigation, "walk")
+            controller.dispatch("navigation", "zoom")
+            self.assertEqual(self.state.navigation, "walk")
+            # Slider drags round to 0.1 m/s and 1 cm.
+            controller.dispatch("walk", ("walk_speed", 3.04))
+            controller.dispatch("walk", ("eye_level", 99.0))
+            controller.dispatch("walk", ("eye_level", float("nan")))
+            controller.dispatch("walk", ("zoom_speed", 5.0))
+        self.assertEqual((self.state.walk_speed, self.state.eye_level), (3.0, 10.0))
+        self.assertEqual(self.state.zoom_speed, 1.0)
+
+    def test_walk_settings_load_within_bounds(self) -> None:
+        state: ModuleType = self.state_module
+        saved: dict[str, object] = {"navigation": "walk", "walk_speed": 0.0, "eye_level": 1.75}
+        with (
+            patch.object(state.Path, "is_file", return_value=True),
+            patch.object(state.Path, "read_text", return_value=json.dumps(saved)),
+        ):
+            state.load_preferences()
+        self.assertEqual((self.state.navigation, self.state.walk_speed, self.state.eye_level), ("walk", 0.1, 1.75))
+
+    def test_toolbox_color_sets_every_tool_and_tool_color_only_the_active_tool(self) -> None:
+        controller: ModuleType = self.load_controller()
+        blue: tuple[float, float, float] = (0.2, 0.4, 0.6)
+        red: tuple[float, float, float] = (1.0, 0.0, 0.0)
+        self.state.tool = "paint"
+        with patch.dict(sys.modules, self.imports):
+            controller._set_color(("toolbox", "rgb", blue))
+            self.assertEqual(self.state.color, blue)
+            name: str
+            for name in ("paint", "pipe", "grease"):
+                self.assertEqual(self.state.brushes[name].color, blue)
+            controller._set_color(("tool", "rgb", red))
+            self.assertEqual(self.state.brushes["paint"].color, red)
+            self.assertEqual(self.state.brushes["pipe"].color, blue)
+            self.assertEqual(self.state.color, blue)
+            # The G field edits one sRGB channel of the active tool's colour.
+            controller._set_color(("tool", 1, 255))
+            self.assertEqual(self.state_module.color_hex(self.state.brushes["paint"].color), "FFFF00")
+            # Without a drawing tool there is no tool colour to change.
+            self.state.tool = "select"
+            controller._set_color(("tool", "rgb", blue))
+            self.assertEqual(self.state_module.color_hex(self.state.brushes["paint"].color), "FFFF00")
+
+    def test_grease_pencil_material_follows_color_after_drag_release_only(self) -> None:
+        controller: ModuleType = self.load_controller()
+        orange: tuple[float, float, float] = (1.0, 0.2, 0.0)
+        self.state.tool = "grease"
+        command: MagicMock
+        with patch.dict(sys.modules, self.imports), patch.object(self.pencil, "command") as command:
+            controller._set_color(("tool", "preview", orange))
+            self.assertEqual(self.state.brushes["grease"].color, orange)
+            command.assert_not_called()
+            controller._set_color(("tool", "rgb", orange))
+            command.assert_called_once()
+            self.assertEqual(command.call_args.args[1:], ("color", orange))
+            command.reset_mock()
+            self.state.tool = "pipe"
+            controller._set_color(("toolbox", "rgb", orange))
+            command.assert_not_called()
+
+    def test_pinned_brush_materials_and_tint_take_the_grease_pencil_color(self) -> None:
+        purple: tuple[float, float, float] = self.state_module.DEFAULT_COLOR
+        airbrush: FakeMaterial = FakeMaterial("Airbrush", (0.0, 0.0, 0.0, 0.8))
+        plain: FakeMaterial = FakeMaterial("#70197C", (*purple, 1.0))
+        plain["drawing_pencil"] = "#70197C"
+        materials: list[FakeMaterial] = [airbrush, plain]
+        obj: FakePencil = FakePencil([plain])
+        settings: SimpleNamespace = SimpleNamespace(use_material_pin=True, material=airbrush)
+        brush: SimpleNamespace = SimpleNamespace(
+            name="Airbrush", gpencil_brush_type="DRAW", color=(0.2, 1.0, 0.2), gpencil_settings=settings
+        )
+        self.bpy.data.materials = materials
+        self.pencil.color_brush(obj, brush, purple)
+        variant: FakeMaterial | None = obj.active_material
+        assert variant is not None
+        self.assertIsNot(variant, airbrush)
+        self.assertEqual(variant.name, "Airbrush #70197C")
+        # A linked brush keeps its pin's target, so the pin is off and the copy is the active material.
+        self.assertFalse(settings.use_material_pin)
+        # As in Blender, an unpinned brush then reports no material.
+        settings.material = None
+        # The brush material's texture and opacity stay; only the colour changes.
+        self.assertEqual(variant.grease_pencil.color, (*purple, 0.8))
+        self.assertEqual(airbrush.grease_pencil.color, (0.0, 0.0, 0.0, 0.8))
+        materials.append(variant)
+        # Repeated calls reuse the copy; a new colour makes another from the same style.
+        self.pencil.color_brush(obj, brush, purple)
+        self.assertEqual(obj.data.materials, [plain, variant])
+        self.pencil.color_brush(obj, brush, (1.0, 0.0, 0.0))
+        red: FakeMaterial | None = obj.active_material
+        assert red is not None
+        self.assertEqual(red.name, "Airbrush #FF0000")
+        self.assertEqual(red.get("drawing_pencil_style"), "Airbrush")
+        self.assertEqual(brush.color, (0.2, 1.0, 0.2))
+        # A plain brush afterwards goes back to the plain colour material.
+        pencil_brush: SimpleNamespace = SimpleNamespace(
+            name="Pencil",
+            gpencil_brush_type="DRAW",
+            color=(0.2, 1.0, 0.2),
+            gpencil_settings=SimpleNamespace(use_material_pin=False, material=None),
+        )
+        with patch.object(self.pencil, "material_slot", return_value=0) as slot:
+            self.pencil.color_brush(obj, pencil_brush, purple)
+        slot.assert_called_once_with(obj, purple, False)
+        self.assertIs(obj.active_material, plain)
+        tint: SimpleNamespace = SimpleNamespace(
+            name="Tint",
+            gpencil_brush_type="TINT",
+            color=(0.2, 1.0, 0.2),
+            gpencil_settings=SimpleNamespace(use_material_pin=False, material=None),
+        )
+        self.pencil.color_brush(obj, tint, purple)
+        self.assertEqual(self.state_module.color_hex(self.state_module.srgb_to_linear(tint.color)), "70197C")
+
+
+class FakePencil:
+    """The app's Grease Pencil object, with material slots as `color_brush` uses them."""
+
+    def __init__(self, materials: list[FakeMaterial]) -> None:
+        self.type: str = "GREASEPENCIL"
+        self.data: SimpleNamespace = SimpleNamespace(materials=materials)
+        self.active_material_index: int = 0
+
+    def get(self, key: str) -> bool:
+        return key == "drawing_pencil"
+
+    @property
+    def material_slots(self) -> list[SimpleNamespace]:
+        materials: list[FakeMaterial] = self.data.materials
+        return [SimpleNamespace(material=material) for material in materials]
+
+    @property
+    def active_material(self) -> FakeMaterial | None:
+        materials: list[FakeMaterial] = self.data.materials
+        return materials[self.active_material_index] if self.active_material_index < len(materials) else None
+
+
+class FakeMaterial(dict[str, object]):
+    """A Grease Pencil material with custom properties, as `color_brush` reads and copies it."""
+
+    def __init__(self, name: str, color: tuple[float, float, float, float]) -> None:
+        super().__init__()
+        self.name: str = name
+        self.grease_pencil: SimpleNamespace = SimpleNamespace(color=color, fill_color=(*color[:3], 0.0))
+
+    def copy(self) -> FakeMaterial:
+        twin: FakeMaterial = FakeMaterial(self.name + ".001", self.grease_pencil.color)
+        twin.grease_pencil.fill_color = self.grease_pencil.fill_color
+        twin.update(self)
+        return twin
 
 
 if __name__ == "__main__":

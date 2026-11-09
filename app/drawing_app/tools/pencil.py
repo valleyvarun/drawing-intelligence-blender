@@ -14,21 +14,30 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..core.blender import bpy, view3d_utils
-from ..core.state import AppState, Pencil, Vec3, get_state
+from ..core.state import AppState, Pencil, Vec3, clean_color, color_hex, get_state, linear_to_srgb
 from ..viewport import fills
 from . import layers
 
 MODE: str = "PAINT_GREASE_PENCIL"
 MARKER: str = "drawing_pencil"
+# On a recoloured copy of a brush's pinned material: the original material's name.
+STYLE: str = "drawing_pencil_style"
+# Brushes whose material pin this app turned off, by name, with their pinned material's name. Blender
+# reports no material once the pin is off, so later colours are copied from an existing recoloured copy.
+_STYLED: dict[str, str] = {}
 LAYER: str = "Layer"
 LIBRARY: str = "brushes/essentials_brushes-gp_draw.blend/Brush/"
+# Blender's shape primitives; the Tool Box shows them as one Shape tool with this choice in its settings.
+SHAPES: tuple[tuple[str, str], ...] = (
+    ("builtin.box", "Rectangle"),
+    ("builtin.circle", "Ellipse"),
+)
 DRAWING_TOOLS: tuple[tuple[str, str], ...] = (
     ("builtin.brush", "Draw"),
     ("builtin_brush.Fill", "Fill"),
     ("builtin.polyline", "Polyline"),
     ("builtin.curve", "Curve"),
-    ("builtin.box", "Box"),
-    ("builtin.circle", "Circle"),
+    *SHAPES,
 )
 ERASING_TOOLS: tuple[tuple[str, str], ...] = (
     ("builtin.trim", "Trim"),
@@ -70,7 +79,7 @@ PLANES: tuple[tuple[str, str], ...] = (
     ("AXIS_Z", "Top (XY)"),
     ("CURSOR", "3D Cursor"),
 )
-# Grease Pencil materials offered as the Tool Box colors.
+# Preset Grease Pencil colours; other picked colours get "#RRGGBB" materials.
 COLORS: tuple[tuple[str, Vec3], ...] = (
     ("Black", (0.0, 0.0, 0.0)),
     ("White", (0.8, 0.8, 0.8)),
@@ -372,17 +381,28 @@ def selection_command(context: Any, command: str) -> bool:
     return True
 
 
-def _color(name: str) -> Vec3:
+def palette_color(name: str) -> Vec3 | None:
     label: str
     color: Vec3
     for label, color in COLORS:
         if label == name:
             return color
-    return COLORS[0][1]
+    return None
 
 
-def material_slot(obj: Any, name: str, fill: bool) -> int:
-    """The object's slot for a palette material, added like Blender's own stroke and fill materials."""
+def color_label(color: Vec3) -> str:
+    """A preset's name when the colour matches one, otherwise its '#RRGGBB' hex."""
+    label: str
+    preset: Vec3
+    for label, preset in COLORS:
+        if max(abs(color[0] - preset[0]), abs(color[1] - preset[1]), abs(color[2] - preset[2])) < 1e-4:
+            return label
+    return "#" + color_hex(color)
+
+
+def material_slot(obj: Any, color: Vec3, fill: bool) -> int:
+    """The object's slot for a colour's material, added like Blender's own stroke and fill materials."""
+    name: str = color_label(color)
     label: str = f"{name} Fill" if fill else name
     opacity: float = get_state().pencil.fill_opacity if fill else 1.0
     index: int
@@ -391,7 +411,6 @@ def material_slot(obj: Any, name: str, fill: bool) -> int:
         if slot.material is not None and slot.material.get(MARKER) == label:
             if not fill or abs(float(slot.material.grease_pencil.fill_color[3]) - opacity) < 1e-6:
                 return index
-    color: Vec3 = _color(name)
     material: Any = bpy.data.materials.new(label)
     bpy.data.materials.create_gpencil_data(material)
     style: Any = material.grease_pencil
@@ -427,7 +446,7 @@ def pencil_object(context: Any, create: bool = True) -> Any:
     layers.link_stroke(obj, context)
     obj[MARKER] = True
     obj["drawing_kind"] = "grease"
-    obj.active_material_index = material_slot(obj, COLORS[0][0], False)
+    obj.active_material_index = material_slot(obj, get_state().brushes["grease"].color, False)
     return obj
 
 
@@ -457,6 +476,25 @@ def _label(items: tuple[tuple[str, str], ...], code: str) -> str:
     return code.title()
 
 
+def is_shape(tool: str) -> bool:
+    return _has_choice(SHAPES, tool)
+
+
+def toolbox_tools() -> tuple[tuple[str, str], ...]:
+    """Tool Box drawing buttons: the shapes share one Shape button that opens the last-used shape."""
+    pencil: Pencil = get_state().pencil
+    shape: str = pencil.tool if is_shape(pencil.tool) else pencil.shape
+    buttons: list[tuple[str, str]] = []
+    tool: str
+    label: str
+    for tool, label in DRAWING_TOOLS:
+        if not is_shape(tool):
+            buttons.append((tool, label))
+        elif tool == shape:
+            buttons.append((tool, "Shape"))
+    return tuple(buttons)
+
+
 def _has_choice(items: tuple[tuple[str, str | Vec3], ...], code: str) -> bool:
     key: str
     _value: str | Vec3
@@ -466,14 +504,14 @@ def _has_choice(items: tuple[tuple[str, str | Vec3], ...], code: str) -> bool:
     return False
 
 
-def _palette_name(material: Any) -> str | None:
+def _color_name(material: Any) -> str | None:
+    """The colour label of a material made by this app; None for other materials, such as sampled ones."""
     if material is None:
         return None
     label: object = material.get(MARKER)
     if not isinstance(label, str):
         return None
-    name: str = label.removesuffix(" Fill")
-    return name if _has_choice(COLORS, name) else None
+    return label.removesuffix(" Fill")
 
 
 def canvas_label(state: AppState) -> str:
@@ -567,8 +605,74 @@ def _activate_brush(name: str) -> None:
     bpy.ops.brush.asset_activate(asset_library_type="ESSENTIALS", relative_asset_identifier=LIBRARY + name)
 
 
-def enter(context: Any, material: str | None = None) -> bool:
-    """Enter native Draw mode on the active group's object, with the current settings."""
+def color_brush(obj: Any, brush: Any, color: Vec3) -> None:
+    """Make the active brush draw in the Grease Pencil colour.
+
+    Some Essentials brushes (Pencil Soft, Ink Pen Rough, Airbrush) pin their own black material, which
+    Blender uses instead of the active one. A linked brush cannot be pinned to a local material, so its pin
+    is turned off and a copy of its material in this colour, keeping its texture, becomes the active one.
+    Tint paints with the brush colour itself. Nothing is changed when the brush already matches.
+    """
+    if brush is None or not is_pencil(obj):
+        return
+    settings: Any = brush.gpencil_settings
+    if str(brush.gpencil_brush_type) == "TINT":
+        srgb: Vec3 = linear_to_srgb(color)
+        if max(abs(float(brush.color[i]) - srgb[i]) for i in range(3)) > 1e-4:
+            brush.color = srgb
+    pinned: Any = settings.material if settings.use_material_pin else None
+    if pinned is not None and pinned.grease_pencil is None:
+        pinned = None
+    style: str = str(pinned.get(STYLE, pinned.name)) if pinned is not None else _STYLED.get(str(brush.name), "")
+    label: str = f"{style} {color_label(color)}"
+    current: Any = obj.active_material
+    if pinned is None and style and current is not None and current.get(MARKER) == label:
+        # Already drawing with this copy; this runs on every shelf sync, so skip the material search.
+        return
+    # The copy in this colour, and any copy of the style to make it from once the pin is off.
+    variant: Any = None
+    source: Any = pinned
+    material: Any
+    if style:
+        for material in bpy.data.materials:
+            if material.get(STYLE) == style:
+                source = source or material
+                if material.get(MARKER) == label:
+                    variant = material
+                    break
+    if source is None:
+        # Plain brushes draw with the colour material, not a styled copy left by another brush.
+        if current is not None and current.get(STYLE) is not None:
+            obj.active_material_index = material_slot(obj, color, False)
+        return
+    if variant is None:
+        variant = source.copy()
+        variant.name = label
+        variant[MARKER] = label
+        variant[STYLE] = style
+        look: Any = variant.grease_pencil
+        # Keep the brush material's own opacity; only the hue changes.
+        look.color = (*color, float(look.color[3]))
+        look.fill_color = (*color, float(look.fill_color[3]))
+    index: int = -1
+    slot: Any
+    position: int
+    for position, slot in enumerate(obj.material_slots):
+        if slot.material == variant:
+            index = position
+            break
+    if index < 0:
+        obj.data.materials.append(variant)
+        index = len(obj.material_slots) - 1
+    if obj.active_material_index != index:
+        obj.active_material_index = index
+    if settings.use_material_pin:
+        settings.use_material_pin = False
+        _STYLED[str(brush.name)] = style
+
+
+def enter(context: Any, color: Vec3 | None = None) -> bool:
+    """Enter native Draw mode on the active group's object, with the current settings and a new colour, if given."""
     state: AppState = get_state()
     if not layers.can_draw(context):
         leave(context)
@@ -602,12 +706,20 @@ def enter(context: Any, material: str | None = None) -> bool:
     elif tool == "builtin_brush.Erase":
         _activate_brush(pencil.eraser)
     sync_shelf(context.area)
-    color: str | None = material
-    if color is None:
-        color = pencil.material if created or obj.active_material is None else _palette_name(obj.active_material)
+    wanted: Vec3 = state.brushes["grease"].color
+    # A sampled (non-app) material is kept until the Grease Pencil colour changes.
+    if color is None and (
+        created
+        or obj.active_material is None
+        or _color_name(obj.active_material) is not None
+        or color_label(wanted) != pencil.material
+    ):
+        color = wanted
     if color is not None:
         obj.active_material_index = material_slot(obj, color, tool == "builtin_brush.Fill")
-        pencil.material = color
+        pencil.material = color_label(color)
+    if tool in DRAW_TOOLS:
+        color_brush(obj, _paint().brush, wanted)
     if created or entered:
         # As in Blender, entering Draw mode is its own undo step; undoing a stroke keeps the object.
         _undo_push("Grease Pencil Draw Mode")
@@ -637,6 +749,9 @@ def sync_shelf(area: Any) -> None:
                 get_state().pencil.brush = str(brush.name)
             elif tool == "builtin_brush.Erase":
                 get_state().pencil.eraser = str(brush.name)
+            if tool in DRAW_TOOLS:
+                # Brushes picked from the shelf follow the colour too.
+                color_brush(bpy.context.view_layer.objects.active, brush, get_state().brushes["grease"].color)
     try:
         if space.show_region_asset_shelf != visible:
             space.show_region_asset_shelf = visible
@@ -669,18 +784,23 @@ def refresh(context: Any) -> None:
 def command(context: Any, field: str, value: object) -> None:
     """Tool Box changes to Blender's native Grease Pencil tools, brushes, and placement."""
     pencil: Pencil = get_state().pencil
-    material: str | None = None
+    color: Vec3 | None = None
     if field == "tool" and isinstance(value, str) and _has_choice(TOOLS, value):
         get_state().tool = "grease"
         get_state().status = "Grease Pencil: " + _label(TOOLS, value)
         pencil.tool = value
+        if _has_choice(SHAPES, value):
+            pencil.shape = value
     elif field == "brush" and isinstance(value, str) and value in ERASE_BRUSHES:
         pencil.eraser = value
     elif field == "brush" and isinstance(value, str) and value in DRAW_BRUSHES:
         pencil.brush = value
-    elif field == "material" and isinstance(value, str) and _has_choice(COLORS, value):
-        pencil.material = value
-        material = value
+    elif field == "material" and isinstance(value, str) and palette_color(value) is not None:
+        color = palette_color(value)
+    elif field == "color" and isinstance(value, tuple) and len(value) == 3:
+        color = clean_color(value)
+        if color is None:
+            return
     elif field == "fill_opacity" and isinstance(value, (int, float)) and math.isfinite(value):
         pencil.fill_opacity = max(0.0, min(1.0, float(value)))
     elif field == "placement" and isinstance(value, str) and _has_choice(PLACEMENTS, value):
@@ -690,7 +810,9 @@ def command(context: Any, field: str, value: object) -> None:
     else:
         _brush_setting(field, value)
         return
-    enter(context, material)
+    if color is not None:
+        get_state().brushes["grease"].color = color
+    enter(context, color)
 
 
 def _brush_setting(field: str, value: object) -> None:
@@ -737,7 +859,7 @@ def view(context: Any) -> PencilView | None:
     name: str = "unprojected_size" if scene_size else "size"
     rna: Any = brush.bl_rna.properties[name]
     material: Any = obj.active_material
-    material_name: str = (_palette_name(material) or str(material.name)) if material is not None else ""
+    material_name: str = (_color_name(material) or str(material.name)) if material is not None else ""
     return PencilView(
         tool,
         str(brush.name),

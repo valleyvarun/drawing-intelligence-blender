@@ -171,18 +171,37 @@ def _load_post(_unused: Any) -> None:
 
 @bpy.app.handlers.persistent
 def _save_pre(_unused: Any) -> None:
-    from .core.project import persist_scene
+    from .core.project import persist_scene, saving_startup_file
+    from .tools import printer
     from .ui import layout
 
+    # A 3D print still forming is written as it is now.
+    printer.flush()
     layout.capture_widths(bpy.context)
-    persist_scene()
+    # The startup file opens every new session, so it must not carry one drawing's tool state.
+    if not saving_startup_file():
+        persist_scene()
     save_preferences()
+
+
+def _install_agent() -> None:
+    """Start the Blender MCP bridge and the Claude Code chat service."""
+    from . import agent
+    from .ui import layout
+
+    def redraw() -> None:
+        layout.redraw()
+
+    agent.install(redraw)
 
 
 @bpy.app.handlers.persistent
 def _exit_pre(_interactive: bool) -> None:
+    from . import agent
     from .ui import layout
 
+    # Claude Code and the bridge must not outlive the app.
+    agent.uninstall()
     layout.capture_widths(bpy.context)
     window: Any = bpy.context.window_manager.windows[0] if bpy.context.window_manager.windows else None
     if window is not None and identity().is_visible():
@@ -208,11 +227,14 @@ def _identity_tick() -> float | None:
 def _history_post(_scene: Any) -> None:
     from .core.controller import redraw
     from .core.project import restore_scene
+    from .tools import printer
     from .tools.layers import ensure_scene
     from .tools.pipe_fill import cancel
     from .ui import overlay
 
     cancel()
+    # Undo restored the prints' meshes and fields; a print still forming is dropped.
+    printer.reset()
     restore_scene()
     ensure_scene()
     overlay.invalidate_images()
@@ -239,6 +261,7 @@ def register() -> None:
     project.register()
     controller.register()
     _REGISTERED = True
+    _install_agent()
     _prepare_scene()
     project.restore_scene()
     bpy.app.handlers.load_post.append(_load_post)
@@ -259,6 +282,7 @@ def register() -> None:
 
 def unregister() -> None:
     global _REGISTERED
+    from . import agent
     from .core import controller, project
     from .ui import layout, overlay
     from .viewport import keymap, remove_guides
@@ -266,6 +290,7 @@ def unregister() -> None:
     if not _REGISTERED:
         return
     _REGISTERED = False
+    agent.uninstall()
     layout.capture_widths(bpy.context)
     save_preferences()
     timer: Callable[[], float | None]

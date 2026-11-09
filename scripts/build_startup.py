@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from drawing_app.core import controller
+from drawing_app.core import controller, project
 from drawing_app.core.blender import bpy
 from drawing_app.core.state import ROOT
 from drawing_app.ui import layout
@@ -90,7 +90,9 @@ def step() -> float | None:
     window.screen.name = "Drawing"
     _clean_data()
     TARGET.parent.mkdir(parents=True, exist_ok=True)
-    bpy.ops.wm.save_as_mainfile(filepath=str(TARGET), copy=True, compress=True, relative_remap=False)
+    # Drawings are saved without screens; the startup file is the screen, without drawing state.
+    with project.startup_file():
+        bpy.ops.wm.save_as_mainfile(filepath=str(TARGET), copy=True, compress=True, relative_remap=False)
     print(f"Startup file written: {TARGET}")
     bpy.ops.wm.quit_blender()
     return None

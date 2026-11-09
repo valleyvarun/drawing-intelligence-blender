@@ -39,13 +39,17 @@ BINDINGS: tuple[Binding, ...] = tuple(
 ) + (
     Binding("3D View", "VIEW_3D", "view3d.rotate", "RIGHTMOUSE", "orbit"),
     Binding("3D View", "VIEW_3D", "view3d.walk", "RIGHTMOUSE", "fly"),
+    Binding("3D View", "VIEW_3D", "drawing.walk", "RIGHTMOUSE", "walk"),
     Binding("3D View", "VIEW_3D", "view3d.move", "MIDDLEMOUSE", ""),
     Binding("Object Mode", "EMPTY", "view3d.rotate", "RIGHTMOUSE", "orbit"),
     Binding("Object Mode", "EMPTY", "view3d.walk", "RIGHTMOUSE", "fly"),
+    Binding("Object Mode", "EMPTY", "drawing.walk", "RIGHTMOUSE", "walk"),
     Binding("Grease Pencil Draw Mode", "EMPTY", "view3d.rotate", "RIGHTMOUSE", "orbit"),
     Binding("Grease Pencil Draw Mode", "EMPTY", "view3d.walk", "RIGHTMOUSE", "fly"),
+    Binding("Grease Pencil Draw Mode", "EMPTY", "drawing.walk", "RIGHTMOUSE", "walk"),
     Binding("Grease Pencil Edit Mode", "EMPTY", "view3d.rotate", "RIGHTMOUSE", "orbit"),
     Binding("Grease Pencil Edit Mode", "EMPTY", "view3d.walk", "RIGHTMOUSE", "fly"),
+    Binding("Grease Pencil Edit Mode", "EMPTY", "drawing.walk", "RIGHTMOUSE", "walk"),
 )
 # Fly is Blender's walk navigation while the right button is held; Ctrl slows it.
 WALK_ITEMS: tuple[tuple[str, str, str], ...] = (
@@ -113,7 +117,7 @@ def install_walk() -> bool:
 
 
 def update() -> None:
-    """Follow the Orbit/Fly choice from the viewport menu."""
+    """Follow the Orbit/Fly/Walk choice from the viewport menu."""
     navigation: str = get_state().navigation
     _keymap: Any
     entry: Any

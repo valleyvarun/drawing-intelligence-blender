@@ -11,7 +11,7 @@ from typing import Any
 
 import drawing_app.viewport as viewport
 from drawing_app.core.blender import Vector, bpy
-from drawing_app.core.state import Pencil, Tool, get_state
+from drawing_app.core.state import Pencil, Tool, Vec3, get_state, parse_hex
 from drawing_app.tools import canvas, layers, pencil
 from drawing_app.tools.canvas import Hit
 from drawing_app.tools.drawing import DrawingController, write_mesh
@@ -297,6 +297,7 @@ canvas.ray = original_ray
 get_state().cursor_active = get_state().cursor_placed = get_state().cursor_placing = False
 get_state().on_object = get_state().drawing_plane = False
 get_state().pencil = Pencil()
+get_state().brushes["grease"].color = (0.0, 0.0, 0.0)
 get_state().tool = "grease"
 settings: Any = context.scene.tool_settings
 with context.temp_override(area=area, region=region):
@@ -326,6 +327,21 @@ with context.temp_override(area=area, region=region):
     pencil.command(context, "tool", "builtin.brush")
     assert settings.gpencil_paint.brush.name == "Ink Pen" and gp_object.active_material.get(pencil.MARKER) == "Red"
     report["native_tools_brush_assets_and_materials"] = True
+    # Any picked colour gets its own stroke and fill materials.
+    orange: Vec3 | None = parse_hex("FF8000")
+    assert orange is not None
+    pencil.command(context, "color", orange)
+    picked: Any = gp_object.active_material
+    assert picked.get(pencil.MARKER) == "#FF8000" and picked.grease_pencil.is_stroke_visible
+    assert (Vector(picked.grease_pencil.color[:3]) - Vector(orange)).length < 1e-6
+    assert get_state().brushes["grease"].color == orange and get_state().pencil.material == "#FF8000"
+    pencil.command(context, "tool", "builtin_brush.Fill")
+    assert gp_object.active_material.get(pencil.MARKER) == "#FF8000 Fill"
+    pencil.command(context, "tool", "builtin.brush")
+    assert gp_object.active_material == picked
+    pencil.command(context, "material", "Red")
+    assert gp_object.active_material.get(pencil.MARKER) == "Red"
+    report["picked_colors_make_grease_pencil_materials"] = True
     gp_brush: Any = settings.gpencil_paint.brush
     pencil.command(context, "strength", 0.4)
     pencil.command(context, "hardness", 0.25)

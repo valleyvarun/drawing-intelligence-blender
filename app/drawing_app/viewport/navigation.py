@@ -24,16 +24,6 @@ AXIS_COLORS: tuple[tuple[float, float, float], ...] = (
     (113.0 / 255.0, 163.0 / 255.0, 118.0 / 255.0),
     (79.0 / 255.0, 125.0 / 255.0, 160.0 / 255.0),
 )
-VIEW_KEYS: dict[str, str] = {
-    "ONE": "X",
-    "TWO": "Y",
-    "THREE": "Z",
-    "ZERO": "PERSPECTIVE",
-    "NUMPAD_1": "X",
-    "NUMPAD_2": "Y",
-    "NUMPAD_3": "Z",
-    "NUMPAD_0": "PERSPECTIVE",
-}
 
 
 @dataclass(frozen=True)
@@ -214,12 +204,6 @@ class NavigationController:
         target_region: Any = self._region if self._drag and self._region is not None else region
         rv3d: Any = target_area.spaces.active.region_3d
         position: Point = (float(event.mouse_x - target_region.x), float(event.mouse_y - target_region.y))
-        if kind in VIEW_KEYS and value == "PRESS" and not self._drag:
-            if not (event.ctrl or event.shift or event.alt or event.oskey):
-                if not getattr(event, "is_repeat", False):
-                    set_view(rv3d, VIEW_KEYS[kind])
-                    target_area.tag_redraw()
-                return True
         if kind == "RIGHTMOUSE" and value == "PRESS" and get_state().navigation == "fly":
             from .guides import navigation_distance, update_clipping
             from .keymap import set_walk_speed
@@ -265,10 +249,7 @@ class NavigationController:
             zoom_view(target_region, rv3d, position, math.pow(WHEEL_STEP, -amount * get_state().zoom_speed), context)
             target_area.tag_redraw()
             return True
-        frame: bool = kind == "NUMPAD_PERIOD" or (kind == "F" and get_state().tool != "grease")
-        if frame and value == "PRESS" and not self._drag:
-            frame_selected(context, area, region)
-            return True
+        # Keyboard view keys (1/2/3/0, F, numpad) are in core/shortcuts.py.
         return False
 
     def tick(self, context: Any, dt: float) -> None:

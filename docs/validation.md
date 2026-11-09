@@ -1,5 +1,17 @@
 # Validation
 
+## Claude Code chat, Blender MCP, and scripting (2026-11-08)
+
+Black, Ruff, syntax compilation, and both Pyright configurations (standalone and editor context) pass with zero errors. The tools were installed in a temporary folder outside the repository because this machine's `.checks/python-tools` copy is not readable by the current user.
+
+Host-only tests pass: `test_api_registry.py`, `test_agent_chat.py` (a stand-in Claude Code CLI speaking stream-json), `test_agent_mcp.py` (the real MCP server process and bridge), and the existing lightweight suite. The Blender engine test `test_agent_native.py` passes; it runs every tool on real scene data and drives the real MCP server process against the bridge. `test_project.py` and `test_surface_render.py` pass.
+
+The protocol was checked against Claude Code 2.1.319 (the CLI bundled with the VS Code extension): streamed events, one `assistant` event per content block, `can_use_tool` permission requests with `--permission-prompt-tool stdio`, and allow replies. A full in-app run typed a request into the chat with simulated input; Claude Code (Haiku, about US$0.01) called `mcp__blender__draw_stroke`, the app drew the pipe circle, and the reply streamed into the panel. Windows > Scripting opened the text editor and console and ran the example script.
+
+Chat parity follow-up: `test_agent_chat.py` covers the warm start, the initialize reply's account and models, model/mode/effort flags and live control requests, account status, and sign-in/out through a stand-in CLI; `test_pencil_toolbar.py` covers the Clayers/chat divider and saved settings. With Claude Code 2.1.319, `--model`, `--permission-mode`, and `--effort` and the live `set_model`, `set_permission_mode`, and `apply_flag_settings` requests were confirmed without sending a message. In the app, the warm start showed the account and model list, choosing Sonnet and Plan mode switched the running CLI, and dragging the divider saved the new split.
+
+Known failures that predate this change and reproduce on the committed version: `test_drawing.py` stops at the sampled-material check after `leave()`; `test_ui.py` fails its first walk-keymap count; `test_ui_lifecycle.py` cannot click the Units button because the 1600×900 test window at this machine's UI scale is narrower than the viewport header. A copy of the lifecycle test without the header steps passes through the layer, object rename/lock, undo, and layout-reset steps. `test_pipe_editing_native.py` needs a window; with one, its checks pass and its cleanup then fails restoring the asset-shelf flag.
+
 ## Recovery audit (2026-11-06)
 
 Routine validation now runs without Blender or GPU work. Engine and native UI regressions require explicit `-EngineTests` or `-UI` switches, run sequentially, and use a CPU-thread limit and process timeout. Static checks use locally available tools; no dependency download is part of validation.
@@ -47,6 +59,10 @@ The optional engine checks use isolated Blender processes, not the user's existi
 | `tests/test_translucent_fill_native.py` | Temporary-scene GPU viewport rendering reproduces Grease Pencil disappearing behind translucent mesh fills, then checks matching pipe/Grease Pencil compositing, foreground occlusion, zero/full opacity, and native fill-interior rectangle selection. Uses a 256-pixel offscreen viewport and invokes the custom drawing pass directly; restores the original scene. |
 | `tests/test_pencil_surface_native.py` | Native 256-pixel offscreen depth checks for tilted translucent fills, zero-opacity surfaces, and nearer meshes. Confirms temporary native surface exposure and restoration. Actual pen input is covered separately; this test does not replay a native brush stroke. |
 | `tests/test_surface_render.py` | Native Workbench captures of paint across cube and curved surfaces, pipe end caps, Grease Pencil brush shapes, and paired foreground-occlusion captures. |
+| `tests/test_api_registry.py` | Host-only tool schemas from signatures and docstrings, defaults, enums, read-only and approval hints, and argument checks. |
+| `tests/test_agent_chat.py` | Host-only chat session with a stand-in CLI: streaming, launch flags, allow/deny/always permission replies, cancelled prompts, interrupt, resume, new chat, and missing CLI. |
+| `tests/test_agent_mcp.py` | Host-only MCP server process: initialize, tools/list and tools/call relay, errors, discovery file, token rejection, and an absent app. |
+| `tests/test_agent_native.py` | Blender: every scripting tool on real data (strokes, objects, groups, planes, colours, Python), runner results, and the MCP server driving the app through the bridge. |
 | `scripts/static_check.py` | Syntax plus generation of the exact host-editor type-checking context. |
 
 Results are recorded in `.checks/*-report.json`; the earlier engine runs used Blender 5.2.2 LTS. Static validation includes Black at 120 columns, Ruff, standalone Pyright, and a separate Pyright run using the actual repository editor paths. This standalone checkout currently has one extra import path, `app`.

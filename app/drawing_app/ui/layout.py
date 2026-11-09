@@ -285,9 +285,10 @@ def remember_width(area: Any, scale: float, *, save: bool = True) -> None:
 
 
 def reset(context: Any) -> None:
-    """Restore the initial sidebar widths through the same native layout path."""
+    """Restore the initial sidebar widths and Clayers/chat split through the same native layout path."""
     get_state().left_width = 220
     get_state().right_width = 280
+    get_state().layers_share = 1.0 / 3.0
     _ROLES.clear()
     # Rebuild the editors from one area, as the default widths are split exactly.
     configure(context, adopt=False)

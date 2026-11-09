@@ -16,6 +16,11 @@ from .preview import BrushPreview
 from .surface import PaintSurface
 
 
+def _flat(location: Hit | None) -> Hit | None:
+    """The same point, facing up: the 3D Printer's footprint is horizontal."""
+    return Hit(location.position, (0.0, 0.0, 1.0), location.source) if location is not None else None
+
+
 def material(brush: Brush) -> Any:
     result: Any = bpy.data.materials.new("Drawing Ink")
     result.diffuse_color = (*brush.color, brush.opacity)
@@ -72,6 +77,36 @@ def write_mesh(
     mesh.update()
 
 
+def stroke_object(context: Any, kind: str, brush: Brush) -> Any:
+    """A new paint or pipe stroke in the active group, with one material per opacity level."""
+    data: Any = bpy.data.meshes.new("Paint Stroke" if kind == "paint" else "Pipe Stroke")
+    obj: Any = bpy.data.objects.new(data.name, data)
+    layers.link_stroke(obj, context)
+    obj["drawing_preview"] = True
+    obj["drawing_kind"] = kind
+    obj["drawing_shape"] = brush.shape
+    obj.color = (*brush.color, brush.opacity)
+    ink: Any = material(brush)
+    level: int
+    for level in range(16):
+        entry: Any = ink if level == 0 else ink.copy()
+        entry.name = f"Drawing Ink {level:02d}"
+        entry.diffuse_color = (*brush.color, level / 15.0)
+        obj.data.materials.append(entry)
+    obj.show_wire = False
+    return obj
+
+
+def store_samples(obj: Any, samples: list[Sample]) -> None:
+    """Finish a stroke: keep its pressure samples for Trim, Fill, and rebuilding its mesh."""
+    obj["drawing_preview"] = False
+    values: list[float] = []
+    sample: Sample
+    for sample in samples:
+        values.extend((*sample.position, sample.radius, sample.hardness, sample.opacity, *sample.normal))
+    obj["drawing_samples"] = values
+
+
 class DrawingController:
     def __init__(self) -> None:
         self._object: Any = None
@@ -96,10 +131,13 @@ class DrawingController:
         self._paint_surface: PaintSurface | None = None
         self._pipe_cache: PipeCache | None = None
         self._uploaded_samples: int = 0
+        # 3D Printer: the button is held and material is flowing; the start is the canvas it follows.
+        self._pouring: bool = False
+        self._pour_start: Hit | None = None
 
     @property
     def is_drawing(self) -> bool:
-        return self._object is not None
+        return self._object is not None or self._pouring
 
     @property
     def viewport_context(self) -> tuple[Any, Any] | None:
@@ -122,6 +160,10 @@ class DrawingController:
         radius: float = state.brush.radius / max(1e-12, float(context.scene.unit_settings.scale_length))
         location: Hit | None = canvas.hit(context, event, area, region, placing=state.cursor_placing)
         recognized: str = ""
+        if state.tool == "printer" and not state.cursor_placing:
+            # Material falls straight down, so the nozzle's footprint lies flat.
+            self._preview.update(area, region, _flat(location), radius)
+            return location
         if state.axes_spokes and not state.cursor_placing:
             pipe: Hit | None = canvas.pipe_hit(context, event, area, region, radius)
             if pipe is not None:
@@ -130,7 +172,7 @@ class DrawingController:
         return location
 
     def begin(self, context: Any, event: Any, area: Any, region: Any) -> bool:
-        if self.is_drawing or get_state().tool not in ("paint", "pipe"):
+        if self.is_drawing or get_state().tool not in ("paint", "pipe", "printer"):
             return False
         location: Hit | None = self._target(context, event, area, region)
         if location is None:
@@ -143,6 +185,13 @@ class DrawingController:
         if not self._undo_started and bpy.ops.ed.undo_push.poll():
             bpy.ops.ed.undo_push(message="Drawing session")
             self._undo_started = True
+        if get_state().tool == "printer":
+            from . import printer
+
+            self._area, self._region, self._scene = area, region, context.scene
+            self._pour_start = location
+            self._pouring = printer.start(context, area, region, location)
+            return True
         self._brush = deepcopy(get_state().brush)
         self._kind = get_state().tool
         self._pipe_cache = PipeCache() if self._kind == "pipe" else None
@@ -168,21 +217,7 @@ class DrawingController:
             if self._paint_cache is not None and source is not None and not get_state().axes_spokes
             else None
         )
-        data: Any = bpy.data.meshes.new("Paint Stroke" if self._kind == "paint" else "Pipe Stroke")
-        self._object = bpy.data.objects.new(data.name, data)
-        layers.link_stroke(self._object, context)
-        self._object["drawing_preview"] = True
-        self._object["drawing_kind"] = self._kind
-        self._object["drawing_shape"] = self._brush.shape
-        self._object.color = (*self._brush.color, self._brush.opacity)
-        ink: Any = material(self._brush)
-        level: int
-        for level in range(16):
-            entry: Any = ink if level == 0 else ink.copy()
-            entry.name = f"Drawing Ink {level:02d}"
-            entry.diffuse_color = (*self._brush.color, level / 15.0)
-            self._object.data.materials.append(entry)
-        self._object.show_wire = False
+        self._object = stroke_object(context, self._kind, self._brush)
         self._upload()
         return True
 
@@ -242,7 +277,46 @@ class DrawingController:
         adjusted[self._axis] -= self._axis_offset
         return Hit((adjusted[0], adjusted[1], adjusted[2]), tip.normal, "axis")
 
+    def _pour_location(self, context: Any, event: Any) -> Hit | None:
+        """Where the nozzle is now: on the canvas the pour started on, like a paint stroke."""
+        start: Hit | None = self._pour_start
+        if start is None:
+            return None
+        if start.source in ("ground", "plane", "cursor"):
+            origin: Any
+            direction: Any
+            origin, direction = canvas.ray(event, self._area, self._region)
+            return canvas.intersect(origin, direction, Vector(start.position), Vector(start.normal), start.source)
+        return canvas.hit(context, event, self._area, self._region)
+
+    def _stop_pour(self) -> None:
+        """Stop the flow; particles already falling still land and the print keeps forming."""
+        from . import printer
+
+        if self._pouring:
+            printer.release()
+        self._pouring = False
+        self._pour_start = None
+
     def handle(self, context: Any, event: Any, area: Any, region: Any) -> bool:
+        if self._pouring:
+            from . import printer
+
+            if context.scene != self._scene or get_state().tool != "printer":
+                self._stop_pour()
+                return False
+            if (event.type == "ESC" and event.value == "PRESS") or (
+                event.type == "LEFTMOUSE" and event.value == "RELEASE"
+            ):
+                self._stop_pour()
+                return True
+            if event.type in ("MOUSEMOVE", "INBETWEEN_MOUSEMOVE"):
+                location: Hit | None = self._pour_location(context, event)
+                printer.aim(location)
+                radius: float = get_state().brush.radius / max(1e-12, float(context.scene.unit_settings.scale_length))
+                self._preview.update(self._area, self._region, _flat(location), radius)
+                return True
+            return event.type in ("LEFTMOUSE", "RIGHTMOUSE")
         if self.is_drawing:
             if context.scene != self._scene:
                 self.cancel()
@@ -297,7 +371,7 @@ class DrawingController:
             self._preview.clear()
             return True
         if event.type in ("MOUSEMOVE", "INBETWEEN_MOUSEMOVE") and (
-            state.tool in ("paint", "pipe") or state.cursor_placing
+            state.tool in ("paint", "pipe", "printer") or state.cursor_placing
         ):
             now: float = time.monotonic()
             if now - self._last_hover >= 1.0 / 60.0:
@@ -315,7 +389,9 @@ class DrawingController:
         return False
 
     def finish(self, context: Any) -> None:
-        if self.is_drawing:
+        if self._pouring:
+            self._stop_pour()
+        elif self.is_drawing:
             self._finish(context)
 
     def _finish(self, context: Any) -> None:
@@ -328,12 +404,7 @@ class DrawingController:
         obj: Any = self._object
         if obj is None:
             return
-        obj["drawing_preview"] = False
-        values: list[float] = []
-        sample: Sample
-        for sample in self._samples:
-            values.extend((*sample.position, sample.radius, sample.hardness, sample.opacity, *sample.normal))
-        obj["drawing_samples"] = values
+        store_samples(obj, self._samples)
         get_state().status = f"{self._kind.title()} stroke · {len(self._samples)} samples"
         self._object = None
         self._samples = []
@@ -347,6 +418,7 @@ class DrawingController:
             bpy.ops.ed.undo_push(message=f"3D {self._kind} stroke")
 
     def cancel(self) -> None:
+        self._stop_pour()
         obj: Any = self._object
         if obj is not None:
             data: Any = obj.data

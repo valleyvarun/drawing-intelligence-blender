@@ -6,13 +6,28 @@ import math
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from ..tools.drawing import DrawingController
 from ..viewport import NavigationController
 from .blender import bpy
 from .project import persist_scene
-from .state import AppState, Tool, get_state, save_preferences
+from .shortcuts import Shortcut, is_blocked, shortcut_for
+from .state import (
+    DRAWING_TOOLS,
+    NAVIGATION_MODES,
+    PRINTER_LIMITS,
+    TOOLS,
+    WALK_LIMITS,
+    AppState,
+    Tool,
+    Vec3,
+    clean_color,
+    get_state,
+    linear_to_srgb,
+    save_preferences,
+    srgb_to_linear,
+)
 
 
 def redraw() -> None:
@@ -37,17 +52,97 @@ def viewport_context() -> tuple[Any, Any]:
     return area, region
 
 
+# Where the pointer was for the shortcut being run: area, its WINDOW region, and window x/y.
+_POINTER: tuple[Any, Any, float, float] | None = None
+# Set by a pointer command that found nothing to act on, so its click continues as an ordinary one.
+_MISSED: bool = False
+
+
+def set_pointer(area: Any, region: Any, x: float, y: float) -> None:
+    global _POINTER, _MISSED
+    _POINTER = (area, region, x, y)
+    _MISSED = False
+
+
+def pointer_missed() -> bool:
+    return _MISSED
+
+
+def _activate_clicked_plane() -> None:
+    """Make the drawing plane under the pointer the active one (double-click)."""
+    global _MISSED
+    from ..tools import canvas, layers
+
+    pointer: tuple[Any, Any, float, float] | None = _POINTER
+    plane: Any = None
+    if pointer is not None and pointer[0].type == "VIEW_3D":
+        area: Any
+        region: Any
+        x: float
+        y: float
+        area, region, x, y = pointer
+        origin: Any
+        direction: Any
+        origin, direction = canvas.ray(None, area, region, pointer=(x, y))
+        with bpy.context.temp_override(area=area, region=region):
+            plane = canvas.plane_under(bpy.context, origin, direction)
+    if plane is None:
+        _MISSED = True
+        return
+    layers.activate(bpy.context, "object:" + str(plane.name))
+    get_state().status = f"Active drawing plane: {plane.name}"
+    redraw()
+
+
+def _plane_on_surface() -> None:
+    """A drawing plane where the pointer meets an object, its face along the surface (Ctrl+Shift+click)."""
+    from ..core.blender import Vector
+    from ..tools import canvas, layers
+
+    state: AppState = get_state()
+    pointer: tuple[Any, Any, float, float] | None = _POINTER
+    if pointer is None or pointer[0].type != "VIEW_3D":
+        state.status = "Ctrl+Shift+click an object in the viewport to put a drawing plane on it"
+        return
+    area: Any
+    region: Any
+    x: float
+    y: float
+    area, region, x, y = pointer
+    origin: Any
+    direction: Any
+    origin, direction = canvas.ray(None, area, region, pointer=(x, y))
+    with bpy.context.temp_override(area=area, region=region):
+        hit: canvas.Hit | None = canvas.object_hit(bpy.context, origin, direction)
+        if hit is None:
+            state.status = "No object under the pointer for a drawing plane"
+            return
+        normal: Any = Vector(hit.normal).normalized()
+        # Face the viewer: a back face's normal points away from the camera.
+        if float(normal.dot(direction)) > 0.0:
+            normal = -normal
+        # Lift the plane off the face toward the viewer so their depths do not flicker against each other;
+        # depth precision falls with view distance, so the gap scales with it (a few mm at working range).
+        gap: float = max(1e-4, float(area.spaces.active.region_3d.view_distance) * 1e-3)
+        plane: Any = layers.create_plane(bpy.context)
+        plane.location = Vector(hit.position) + normal * gap
+        plane.rotation_euler = normal.to_track_quat("Z", "Y").to_euler()
+    state.status = f"Drawing plane on {hit.source}"
+    _undo_push("Create drawing plane on surface")
+
+
 def set_tool(name: str) -> None:
     from ..tools import pencil
     from ..viewport import configure_viewport
 
-    if name not in ("select", "move", "rotate", "scale", "paint", "pipe", "grease"):
+    if name not in TOOLS:
         return
     state: AppState = get_state()
     state.tool = cast(Tool, name)
     state.status = {
         "paint": "Paint: drag to draw on the active canvas",
         "pipe": "Pipe: drag a 3D stroke",
+        "printer": "3D Printer: hold and drag to pour; the print keeps forming as it settles",
         "grease": "Grease Pencil: Blender's Draw mode on the active canvas",
     }.get(name, "")
     area: Any
@@ -92,10 +187,72 @@ def _in_viewport(callback: Callable[[Any], None]) -> None:
         callback(bpy.context)
 
 
+def _set_color(payload: tuple[str, object, object]) -> None:
+    """Tool Box colours recolour every drawing tool; tool colours only the active (or named) tool."""
+    from ..tools import pencil
+
+    state: AppState = get_state()
+    target: str
+    field: object
+    value: object
+    target, field, value = payload
+    kind: str = state.tool if state.tool in DRAWING_TOOLS else ""
+    if target in DRAWING_TOOLS:
+        kind = target
+    if target == "toolbox":
+        current: Vec3 = state.color
+    elif (target == "tool" or target in DRAWING_TOOLS) and kind:
+        current = state.brushes[kind].color
+    else:
+        return
+    color: Vec3 | None = None
+    if field in ("rgb", "preview"):
+        color = clean_color(value)
+    elif field in (0, 1, 2) and isinstance(value, (int, float)) and math.isfinite(value):
+        # R, G, and B fields edit one 0-255 sRGB channel.
+        channels: list[float] = list(linear_to_srgb(current))
+        channels[cast(int, field)] = max(0.0, min(255.0, round(float(value)))) / 255.0
+        color = srgb_to_linear((channels[0], channels[1], channels[2]))
+    if color is None:
+        return
+    if target == "toolbox":
+        state.color = color
+        name: str
+        for name in state.brushes:
+            state.brushes[name].color = color
+    else:
+        state.brushes[kind].color = color
+    # Drag previews skip Grease Pencil; its material is applied once on release.
+    if field != "preview" and state.tool == "grease" and (target == "toolbox" or kind == "grease"):
+        final: Vec3 = color
+
+        def recolor(context: Any) -> None:
+            pencil.command(context, "color", final)
+
+        _in_viewport(recolor)
+
+
 def _undo_push(message: str) -> None:
     persist_scene()
     if not bpy.app.background:
         bpy.ops.ed.undo_push(message=message)
+
+
+def leave_pencil() -> None:
+    """Leave Grease Pencil Draw or Edit mode before object-level changes, as menu commands do."""
+    _leave_pencil()
+
+
+def record_undo(message: str) -> None:
+    """Make the latest change one undo step, when the current context allows it."""
+    persist_scene()
+    if not bpy.app.background and bpy.ops.ed.undo_push.poll():
+        bpy.ops.ed.undo_push(message=message)
+
+
+def busy() -> bool:
+    """A stroke or navigation gesture is in progress; scripted scene edits should wait."""
+    return _ACTIVE is not None and (_ACTIVE.drawing.is_drawing or _ACTIVE.navigation.active)
 
 
 def _transform(payload: tuple[str, int, float]) -> None:
@@ -229,6 +386,49 @@ def _create(kind: str) -> None:
     set_tool("move")
 
 
+def _agent_command(payload: tuple[object, ...]) -> None:
+    """Chat panel commands for the Claude Code session."""
+    from .. import agent
+    from ..ui import menus
+
+    command: object = payload[0]
+    argument: object = payload[1] if len(payload) > 1 else None
+    if command == "send" and isinstance(argument, str):
+        agent.session().send(argument)
+    elif command == "stop":
+        agent.session().interrupt()
+    elif command == "new":
+        agent.new_chat()
+    elif command == "model" and isinstance(argument, str):
+        agent.set_model(argument)
+    elif command == "mode" and isinstance(argument, str):
+        agent.set_mode(argument)
+    elif command == "effort" and isinstance(argument, str):
+        agent.set_effort(argument)
+    elif command == "sign_in":
+        agent.session().sign_in()
+    elif command == "sign_out":
+        agent.session().sign_out()
+    elif command == "answer" and len(payload) == 3 and payload[2] in ("allow", "always", "deny"):
+        decision: Literal["allow", "always", "deny"] = cast(Literal["allow", "always", "deny"], payload[2])
+        agent.session().answer(str(argument), decision)
+    elif command == "locate":
+        menus.locate_claude()
+    elif command == "cli" and isinstance(argument, str):
+        agent.set_cli(argument)
+
+
+def _window_command(command: str) -> None:
+    from .. import agent
+    from ..ui import scripting
+
+    if command == "scripting":
+        scripting.open_window(bpy.context)
+    elif command == "mcp_command":
+        bpy.context.window_manager.clipboard = agent.mcp_command()
+        get_state().status = "Copied. Paste it in a terminal to give Claude Code the app's Blender tools."
+
+
 def _layer_command(payload: tuple[str, str]) -> None:
     from ..tools import layers, pencil
 
@@ -332,8 +532,8 @@ def dispatch(action: str, payload: object = None) -> None:
                 setattr(state.brush, field, bool(value))
             elif field == "shape" and value in ("circle", "square", "triangle"):
                 state.brush.shape = str(value)
-            elif field == "color" and isinstance(value, tuple) and len(value) == 3:
-                state.brush.color = cast(tuple[float, float, float], value)
+        elif action == "color" and isinstance(payload, tuple) and len(payload) == 3:
+            _set_color(cast(tuple[str, object, object], payload))
         elif action == "cursor":
             axis: int
             number: float
@@ -358,11 +558,33 @@ def dispatch(action: str, payload: object = None) -> None:
                 pencil.command(context, pencil_field, pencil_value)
 
             _in_viewport(change_pencil)
-        elif action == "navigation" and payload in ("orbit", "fly"):
+        elif action == "navigation" and (payload in NAVIGATION_MODES or payload == "next"):
             from ..viewport import keymap
 
-            state.navigation = str(payload)
+            if payload == "next":
+                # N cycles Orbit, Fly, Walk.
+                current: int = NAVIGATION_MODES.index(state.navigation) if state.navigation in NAVIGATION_MODES else -1
+                state.navigation = NAVIGATION_MODES[(current + 1) % len(NAVIGATION_MODES)]
+            else:
+                state.navigation = str(payload)
+            state.status = "Navigation: " + state.navigation.title()
             keymap.update()
+        elif action == "printer" and isinstance(payload, tuple) and len(payload) == 2:
+            option: object = payload[0]
+            level: object = payload[1]
+            if option in PRINTER_LIMITS and isinstance(level, (float, int)) and math.isfinite(level):
+                bounds: tuple[float, float] = PRINTER_LIMITS[str(option)]
+                bounded: float = max(bounds[0], min(bounds[1], float(level)))
+                # Particles per drop is a whole number.
+                setattr(state.printer, str(option), round(bounded) if option == "per_drop" else bounded)
+        elif action == "walk" and isinstance(payload, tuple) and len(payload) == 2:
+            setting: object = payload[0]
+            amount: object = payload[1]
+            if setting in WALK_LIMITS and isinstance(amount, (float, int)) and math.isfinite(amount):
+                limits: tuple[float, float] = WALK_LIMITS[str(setting)]
+                # Round slider drags to readable steps: 0.1 m/s and 1 cm.
+                places: int = 1 if setting == "walk_speed" else 2
+                setattr(state, str(setting), round(max(limits[0], min(limits[1], float(amount))), places))
         elif action == "theme" and payload in ("light", "dark"):
             state.theme = str(payload)
         elif action == "units" and payload in ("m", "mm"):
@@ -398,6 +620,10 @@ def dispatch(action: str, payload: object = None) -> None:
             if payload in ("new", "add", "create"):
                 layers.create_plane(bpy.context)
                 _undo_push("Create drawing plane")
+            elif payload == "surface":
+                _plane_on_surface()
+            elif payload == "clicked":
+                _activate_clicked_plane()
             else:
                 layers.activate(bpy.context, str(payload))
         elif action == "frame":
@@ -429,10 +655,18 @@ def dispatch(action: str, payload: object = None) -> None:
                 if action == "cursor_view" and state.cursor_active:
                     view.view_location = bpy.context.scene.cursor.location
                 view.update()
+        elif action == "menu":
+            from ..ui import menus
+
+            menus.show(str(payload))
         elif action == "layout_reset":
             from .. import restart_workspace
 
             restart_workspace()
+        elif action == "agent" and isinstance(payload, (tuple, list)) and payload:
+            _agent_command(tuple(payload))
+        elif action == "window":
+            _window_command(str(payload))
         if state.tool == "grease" and action in (
             "option",
             "cursor_place",
@@ -459,33 +693,6 @@ def dispatch(action: str, payload: object = None) -> None:
 
 _ACTIVE: DRAWING_OT_session | None = None
 # Engine shortcuts that open its own editors, pies, and menus instead of application tools.
-_PLAIN_BLOCKED: frozenset[str] = frozenset(("TAB", "N", "T", "SPACE", "ACCENT_GRAVE", "Q", "M", "Z", "W", "I", "K"))
-_SHIFT_BLOCKED: frozenset[str] = frozenset(("A", "S", "SPACE", "TAB", "ACCENT_GRAVE"))
-_CTRL_BLOCKED: frozenset[str] = frozenset(("SPACE", "TAB", "COMMA", "PAGE_UP", "PAGE_DOWN", "L", "P", "A"))
-
-
-_FRAME_KEYS: frozenset[str] = frozenset(
-    ("LEFT_ARROW", "RIGHT_ARROW", "UP_ARROW", "DOWN_ARROW", "MEDIA_PLAY", "MEDIA_STOP", "MEDIA_FIRST", "MEDIA_LAST")
-)
-
-
-def blocked_shortcut(event: Any) -> bool:
-    """Shortcuts that would show the engine's editors, pies, or menus rather than application tools."""
-    kind: str = str(event.type)
-    # Frame changes and playback; the drawing workspace has no timeline.
-    if kind in _FRAME_KEYS:
-        return True
-    if event.alt:
-        return kind in ("WHEELUPMOUSE", "WHEELDOWNMOUSE")
-    if kind.startswith("F") and kind[1:].isdigit():
-        return kind != "F2" or bool(event.shift or event.ctrl)
-    if event.ctrl:
-        return kind in _CTRL_BLOCKED
-    if event.shift:
-        return kind in _SHIFT_BLOCKED
-    return kind in _PLAIN_BLOCKED
-
-
 _SURFACE_CLEANUPS: set[Callable[[], None]] = set()
 
 
@@ -800,30 +1007,28 @@ class DRAWING_OT_session(bpy.types.Operator):
         if region is None:
             return {"PASS_THROUGH"}
         with context.temp_override(area=area, region=region):
-            if event.value == "PRESS":
-                if event.ctrl and event.type == "S":
-                    dispatch("file", "save_as" if event.shift else "save")
+            if event.value in ("PRESS", "DOUBLE_CLICK") and not event.oskey and not self.navigation.active:
+                # The shortcut table, then Blender keys the app swallows: core/shortcuts.py.
+                shortcut: Shortcut | None = shortcut_for(
+                    str(event.type),
+                    bool(event.ctrl),
+                    bool(event.shift),
+                    bool(event.alt),
+                    get_state().tool,
+                    area.type == "VIEW_3D",
+                    str(event.value),
+                )
+                if shortcut is not None:
+                    if shortcut.repeat or not getattr(event, "is_repeat", False):
+                        set_pointer(area, region, float(event.mouse_x), float(event.mouse_y))
+                        dispatch(shortcut.action, shortcut.payload)
+                        if pointer_missed():
+                            # Nothing under the pointer: Blender resends an unused double-click as a press.
+                            return {"PASS_THROUGH"}
                     return {"RUNNING_MODAL"}
-                if event.ctrl and event.type == "O":
-                    dispatch("file", "open")
-                    return {"RUNNING_MODAL"}
-                if event.ctrl and event.type == "N":
-                    dispatch("file", "new")
-                    return {"RUNNING_MODAL"}
-                if event.ctrl and event.type == "Z":
-                    dispatch("edit", "redo" if event.shift else "undo")
-                    return {"RUNNING_MODAL"}
-                if event.ctrl and event.type == "D":
-                    dispatch("edit", "duplicate")
-                    return {"RUNNING_MODAL"}
-                if event.type in ("DEL", "X") and get_state().tool not in ("paint", "pipe", "grease"):
-                    dispatch("edit", "delete")
-                    return {"RUNNING_MODAL"}
-                # In Grease Pencil Draw mode, F is Blender's brush-radius shortcut.
-                if event.type == "F" and not event.ctrl and get_state().tool != "grease":
-                    dispatch("frame")
-                    return {"RUNNING_MODAL"}
-                if blocked_shortcut(event):
+                if event.value == "PRESS" and is_blocked(
+                    str(event.type), bool(event.ctrl), bool(event.shift), bool(event.alt)
+                ):
                     return {"RUNNING_MODAL"}
             if overlay.handle_event(context, event):
                 self.drawing.clear_hover()
@@ -874,9 +1079,11 @@ class DRAWING_OT_session(bpy.types.Operator):
 
 def stop_session() -> None:
     global _ACTIVE
+    from ..tools import printer
     from ..tools.pipe_fill import cancel
 
     cancel(close=True)
+    printer.shutdown()
     cleanup: Callable[[], None]
     for cleanup in tuple(_SURFACE_CLEANUPS):
         cleanup()
@@ -889,7 +1096,9 @@ def stop_session() -> None:
 
 def register() -> None:
     from ..tools.pipe_edit import DRAWING_OT_pipe_trim
+    from ..viewport.walk import DRAWING_OT_walk
 
+    bpy.utils.register_class(DRAWING_OT_walk)
     bpy.utils.register_class(DRAWING_OT_pipe_trim)
     DRAWING_OT_surface_capture.__annotations__["stroke_count"] = bpy.props.IntProperty(options={"HIDDEN"}, min=0)
     bpy.utils.register_class(DRAWING_OT_surface_capture)
@@ -899,9 +1108,11 @@ def register() -> None:
 
 def unregister() -> None:
     from ..tools.pipe_edit import DRAWING_OT_pipe_trim
+    from ..viewport.walk import DRAWING_OT_walk
 
     stop_session()
     bpy.utils.unregister_class(DRAWING_OT_session)
     bpy.utils.unregister_class(DRAWING_OT_select)
     bpy.utils.unregister_class(DRAWING_OT_surface_capture)
     bpy.utils.unregister_class(DRAWING_OT_pipe_trim)
+    bpy.utils.unregister_class(DRAWING_OT_walk)

@@ -131,37 +131,6 @@ class ZoomNavigationTests(unittest.TestCase):
             self.navigation.set_view(self.view, "PERSPECTIVE")
         self.assertEqual(self.view.view_perspective, "PERSP")
 
-    def test_view_keys_ignore_modifiers_and_key_repeat(self) -> None:
-        touch: ModuleType = ModuleType("_zoom_test.viewport.touch")
-        setattr(touch, "TouchNavigation", MagicMock())
-        with patch.dict(sys.modules, {touch.__name__: touch}):
-            controller: object = self.navigation.NavigationController()
-        area: SimpleNamespace = SimpleNamespace(
-            type="VIEW_3D", spaces=SimpleNamespace(active=SimpleNamespace(region_3d=self.view)), tag_redraw=MagicMock()
-        )
-        region: SimpleNamespace = SimpleNamespace(x=0, y=0)
-        event: SimpleNamespace = SimpleNamespace(
-            type="ONE",
-            value="PRESS",
-            mouse_x=300,
-            mouse_y=300,
-            ctrl=False,
-            shift=False,
-            alt=False,
-            oskey=False,
-            is_repeat=False,
-        )
-        setter: MagicMock
-        with patch.object(self.navigation, "set_view") as setter:
-            handle: MagicMock = MagicMock(wraps=getattr(controller, "handle"))
-            self.assertTrue(handle(self.context, event, area, region))
-            setter.assert_called_once_with(self.view, "X")
-            event.is_repeat = True
-            self.assertTrue(handle(self.context, event, area, region))
-            setter.assert_called_once()
-            event.ctrl = True
-            self.assertFalse(handle(self.context, event, area, region))
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ from importlib import import_module
 from typing import Any
 
 bpy: Any = import_module("bpy")
+bmesh: Any = import_module("bmesh")
 gpu: Any = import_module("gpu")
 blf: Any = import_module("blf")
 mathutils: Any = import_module("mathutils")

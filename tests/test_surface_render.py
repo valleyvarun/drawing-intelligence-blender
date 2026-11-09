@@ -54,7 +54,9 @@ def grease_stroke(name: str, points: list[Vec3], radius: float, material_name: s
     obj: Any = bpy.data.objects.new(name, data)
     layers.link_stroke(obj, bpy.context)
     obj["drawing_kind"] = "grease"
-    obj.active_material_index = pencil.material_slot(obj, material_name, False)
+    preset: Vec3 | None = pencil.palette_color(material_name)
+    assert preset is not None, material_name
+    obj.active_material_index = pencil.material_slot(obj, preset, False)
     drawing.add_strokes([len(points)])
     point: Any
     position: Vec3

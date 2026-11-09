@@ -56,6 +56,10 @@ def rename(kind: str, key: str, name: str) -> None:
     bpy.ops.drawing.rename_item("INVOKE_DEFAULT", target_kind=kind, target_key=key, new_name=name)
 
 
+def locate_claude() -> None:
+    bpy.ops.drawing.locate_claude("INVOKE_DEFAULT")
+
+
 class DRAWING_MT_file(bpy.types.Menu):
     bl_label: str = "File"
     bl_idname: str = "DRAWING_MT_file"
@@ -125,6 +129,34 @@ class DRAWING_MT_rendering(bpy.types.Menu):
         _item(self.layout, "Dark mode", "theme", "dark")
 
 
+class DRAWING_MT_windows(bpy.types.Menu):
+    bl_label: str = "Windows"
+    bl_idname: str = "DRAWING_MT_windows"
+
+    def draw(self, context: Any) -> None:
+        _item(self.layout, "Scripting", "window", "scripting")
+        self.layout.separator()
+        _item(self.layout, "Copy Claude Code MCP Command", "window", "mcp_command")
+
+
+class DRAWING_OT_locate_claude(bpy.types.Operator):
+    """Choose the Claude Code executable used by the chat panel."""
+
+    bl_idname: str = "drawing.locate_claude"
+    bl_label: str = "Use Claude Code"
+    filepath: str
+    filter_glob: str
+
+    def invoke(self, context: Any, event: Any) -> set[str]:
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context: Any) -> set[str]:
+        if _DISPATCH is not None and self.filepath:
+            _DISPATCH("agent", ("cli", self.filepath))
+        return {"FINISHED"}
+
+
 class DRAWING_HT_topbar(bpy.types.Header):
     bl_space_type: str = "TOPBAR"
 
@@ -134,20 +166,47 @@ class DRAWING_HT_topbar(bpy.types.Header):
         row: Any = self.layout.row(align=True)
         row.scale_x = 1.05
         menu: type
-        for menu in (DRAWING_MT_file, DRAWING_MT_edit, DRAWING_MT_view, DRAWING_MT_create, DRAWING_MT_rendering):
+        for menu in (
+            DRAWING_MT_file,
+            DRAWING_MT_edit,
+            DRAWING_MT_view,
+            DRAWING_MT_create,
+            DRAWING_MT_rendering,
+            DRAWING_MT_windows,
+        ):
             row.menu(menu.bl_idname)
 
 
 _CLASSES: tuple[type, ...] = (
     DRAWING_OT_ui_action,
     DRAWING_OT_rename_item,
+    DRAWING_OT_locate_claude,
     DRAWING_MT_file,
     DRAWING_MT_edit,
     DRAWING_MT_view,
     DRAWING_MT_create,
     DRAWING_MT_rendering,
+    DRAWING_MT_windows,
     DRAWING_HT_topbar,
 )
+
+
+# Menus a shortcut can open at the pointer: ("menu", name) in core/shortcuts.py.
+MENUS: dict[str, type] = {
+    "file": DRAWING_MT_file,
+    "edit": DRAWING_MT_edit,
+    "view": DRAWING_MT_view,
+    "create": DRAWING_MT_create,
+    "rendering": DRAWING_MT_rendering,
+    "windows": DRAWING_MT_windows,
+}
+
+
+def show(name: str) -> None:
+    """Open one of the app's menus as a popup at the pointer, as Blender's Shift+A does."""
+    menu: type | None = MENUS.get(name)
+    if menu is not None and menu in _REGISTERED:
+        bpy.ops.wm.call_menu(name=getattr(menu, "bl_idname"))
 
 
 def install(dispatch: Callable[[str, object], None]) -> None:
@@ -163,6 +222,10 @@ def install(dispatch: Callable[[str, object], None]) -> None:
     DRAWING_OT_rename_item.__annotations__["target_kind"] = bpy.props.StringProperty(options={"HIDDEN"})
     DRAWING_OT_rename_item.__annotations__["target_key"] = bpy.props.StringProperty(options={"HIDDEN"})
     DRAWING_OT_rename_item.__annotations__["new_name"] = bpy.props.StringProperty(name="Name")
+    DRAWING_OT_locate_claude.__annotations__["filepath"] = bpy.props.StringProperty(subtype="FILE_PATH")
+    DRAWING_OT_locate_claude.__annotations__["filter_glob"] = bpy.props.StringProperty(
+        default="*.exe;claude*", options={"HIDDEN"}
+    )
     cls: type
     for cls in _CLASSES:
         bpy.utils.register_class(cls)

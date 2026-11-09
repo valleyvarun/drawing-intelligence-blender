@@ -3,13 +3,35 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
 from drawing_app.core.blender import bpy
-from drawing_app.core.project import persist_scene, restore_scene
+from drawing_app.core.project import persist_scene, restore_scene, startup_file
 from drawing_app.core.state import CONFIG, ROOT, get_state, load_preferences, restore_brushes, save_preferences
 from drawing_app.tools import layers
+
+
+def workspaces(path: Path) -> list[str]:
+    """Workspace names stored in a .blend, read from a copy since Blender will not list the open file."""
+    copy: Path = path.with_name(path.stem + "-inspect.blend")
+    shutil.copyfile(path, copy)
+    names: list[str] = []
+    data_from: Any
+    _data_to: Any
+    try:
+        with bpy.data.libraries.load(str(copy)) as (data_from, _data_to):
+            name: str
+            for name in data_from.workspaces:
+                names.append(name)
+    finally:
+        library: Any
+        for library in list(bpy.data.libraries):
+            if Path(bpy.path.abspath(library.filepath)) == copy:
+                bpy.data.libraries.remove(library)
+        copy.unlink()
+    return names
 
 
 def main() -> None:
@@ -48,7 +70,19 @@ def main() -> None:
         bpy.context.scene.unit_settings.scale_length = 0.01
         persist_scene()
         project_path: Path = checks / "round-trip.blend"
+        orphan: Any = bpy.data.materials.new("Project Unused Material")
+        notes: Any = bpy.data.texts.new("Project Notes")
+        notes.write("kept")
+        layout_path: Path = checks / "round-trip-layout.blend"
+        with startup_file():
+            bpy.ops.wm.save_as_mainfile(filepath=str(layout_path), copy=True)
+        assert workspaces(layout_path), "The startup-file path must keep the application's screen"
         bpy.ops.wm.save_as_mainfile(filepath=str(project_path))
+        assert Path(bpy.data.filepath) == project_path, bpy.data.filepath
+        # Blender keeps its own layout for files without screens, as it does for library files.
+        assert not workspaces(project_path), "Saved drawings must not carry the application's layout"
+        report["blend_without_application_layout"] = True
+        assert orphan.users == 0
         get_state().cursor_placed = False
         get_state().brushes["paint"].opacity = 1.0
         get_state().pencil.brush = "Pencil"
@@ -66,6 +100,8 @@ def main() -> None:
         assert bpy.data.collections.get("Project Group") is not None
         assert abs(layers.selected_plane().location.z - 1.4) < 1e-6
         assert abs(bpy.context.scene.unit_settings.scale_length - 0.01) < 1e-8
+        assert bpy.data.materials.get("Project Unused Material") is not None
+        assert bpy.data.texts["Project Notes"].as_string() == "kept"
         report["blend_geometry_layers_canvas_metadata"] = True
         report["nonmeter_scene_units_preserved"] = True
         bpy.ops.mesh.primitive_cube_add(size=1.0, location=(1.0, 2.0, 0.5))
