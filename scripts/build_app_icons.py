@@ -5,6 +5,7 @@ Run from the repository root with any Python 3.11+:
 
 - app.shape.dat (Shape tool): Blender's box-primitive "+" with an overlapping square, circle, and triangle.
 - app.printer.dat (3D Printer): a nozzle, falling drops, and the mound they form.
+- app.extruder.dat (3D Extruder): a nozzle, the tube hanging from it, and the coiled pile it lays.
 
 The format (as in app/drawing_app/assets/blender/SOURCE.txt) is "VCO\\0", width and height bytes, two padding
 bytes, then x/y bytes for every vertex on a 256-unit canvas followed by RGBA bytes for every vertex. The "+"
@@ -128,6 +129,34 @@ def printer_icon() -> list[Triangle]:
     return triangles + fan((128.0, 22.0), mound)
 
 
+def stadium(left: float, right: float, bottom: float, top: float) -> list[Point]:
+    """A rounded bar: a rectangle with half-circle ends, counter-clockwise."""
+    radius: float = (top - bottom) / 2.0
+    middle: float = (top + bottom) / 2.0
+    points: list[Point] = []
+    step: int
+    for step in range(13):
+        angle: float = -math.pi / 2.0 + math.pi * step / 12.0
+        points.append((right - radius + math.cos(angle) * radius, middle + math.sin(angle) * radius))
+    for step in range(13):
+        angle = math.pi / 2.0 + math.pi * step / 12.0
+        points.append((left + radius + math.cos(angle) * radius, middle + math.sin(angle) * radius))
+    return points
+
+
+def extruder_icon() -> list[Triangle]:
+    """A nozzle at the top, the tube hanging from it, and three coils piled up like toothpaste."""
+    nozzle: list[Point] = [(96.0, 234.0), (112.0, 200.0), (144.0, 200.0), (160.0, 234.0)]
+    triangles: list[Triangle] = fan((128.0, 217.0), nozzle)
+    strand: list[Point] = [(118.0, 112.0), (138.0, 112.0), (138.0, 204.0), (118.0, 204.0)]
+    triangles += fan((128.0, 158.0), strand)
+    bounds: tuple[float, float, float, float]
+    for bounds in ((32.0, 224.0, 22.0, 56.0), (56.0, 200.0, 64.0, 94.0), (84.0, 172.0, 102.0, 126.0)):
+        outline: list[Point] = stadium(*bounds)
+        triangles += fan(((bounds[0] + bounds[1]) / 2.0, (bounds[2] + bounds[3]) / 2.0), outline)
+    return triangles
+
+
 def write_icon(path: Path, triangles: list[Triangle], color: Color) -> None:
     positions: bytearray = bytearray()
     triangle: Triangle
@@ -199,7 +228,11 @@ def main() -> None:
             plus.append(triangle)
     if len(plus) != 10:
         raise SystemExit(f"Expected the box icon's 10 plus-sign triangles, found {len(plus)}")
-    icons: dict[str, list[Triangle]] = {"app.shape": shape_icon(plus), "app.printer": printer_icon()}
+    icons: dict[str, list[Triangle]] = {
+        "app.shape": shape_icon(plus),
+        "app.printer": printer_icon(),
+        "app.extruder": extruder_icon(),
+    }
     name: str
     triangles: list[Triangle]
     for name, triangles in icons.items():

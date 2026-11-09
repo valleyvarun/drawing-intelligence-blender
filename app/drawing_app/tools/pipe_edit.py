@@ -1,4 +1,4 @@
-"""Fill and trim adapters for actual 3D pipe geometry."""
+"""Pipe samples, mesh-confirmed junctions, rebuilding, and Fill dispatch for actual 3D pipe geometry."""
 
 from __future__ import annotations
 
@@ -6,20 +6,12 @@ import math
 from importlib import import_module
 from typing import Any
 
-from ..core.blender import Vector, bpy
-from ..core.state import Brush, Vec3, get_state
-from . import canvas, layers, pencil
+from ..core.blender import Vector
+from ..core.state import Brush, Vec3
+from . import canvas, layers
 from .drawing import write_mesh
 from .geometry import Sample, length, profile
-from .pipe_geometry import (
-    Junction,
-    Network,
-    Segment,
-    build_network,
-    closest,
-    sub,
-    trim_parts,
-)
+from .pipe_geometry import Junction, Network, Segment, build_network, sub
 
 
 def _radius_scale(obj: Any) -> float:
@@ -57,18 +49,34 @@ def pipe_objects(context: Any, *, editable: bool = False) -> list[Any]:
 
 
 def network(objects: list[Any]) -> Network:
-    """Confirm centerline junction candidates against the actual transformed meshes."""
+    """Pipe centerline junctions, confirmed against the actual transformed meshes."""
     paths: list[list[Sample]] = []
     obj: Any
     for obj in objects:
         paths.append(samples(obj))
     result: Network = build_network(paths)
-    if not result.junctions:
-        return result
+    confirm(result, list(objects))
+    return result
+
+
+def confirm(result: Network, meshes: list[Any]) -> None:
+    """Keep the junctions between two pipes that their actual meshes confirm.
+
+    `meshes[i]` is path i's pipe object, or None for another stroke, whose junctions are kept as found.
+    """
+    pipes: dict[int, Any] = {}
+    index: int
+    item: Any
+    for index, item in enumerate(meshes):
+        if item is not None and item.get("drawing_kind") == "pipe":
+            pipes[index] = item
+    if not result.junctions or len(pipes) < 2:
+        return
+    paths: list[list[Sample]] = result.paths
     native: Any = import_module("mathutils.bvhtree")
     trees: dict[int, Any] = {}
-    index: int
-    for index, obj in enumerate(objects):
+    obj: Any
+    for index, obj in pipes.items():
         trees[index] = native.BVHTree.FromPolygons(
             [obj.matrix_world @ vertex.co for vertex in obj.data.vertices],
             [tuple(polygon.vertices) for polygon in obj.data.polygons],
@@ -84,7 +92,7 @@ def network(objects: list[Any]) -> Network:
         distances.append(cumulative)
 
     def near(path_index: int, polygon: int, parameter: float, radius: float) -> bool:
-        sides: int = len(profile(str(objects[path_index].get("drawing_shape", "circle"))))
+        sides: int = len(profile(str(pipes[path_index].get("drawing_shape", "circle"))))
         count: int = len(paths[path_index]) - 1
         cap_faces: int = 96 if sides == 16 else 1
         segment: int = (
@@ -99,6 +107,9 @@ def network(objects: list[Any]) -> Network:
     for junction in result.junctions:
         first: Segment = result.segments[junction.first]
         second: Segment = result.segments[junction.second]
+        if first.path not in pipes or second.path not in pipes:
+            confirmed.append(junction)
+            continue
         pair: tuple[int, int] = (first.path, second.path)
         if pair not in overlaps:
             overlaps[pair] = trees[first.path].overlap(trees[second.path])
@@ -111,7 +122,6 @@ def network(objects: list[Any]) -> Network:
                 confirmed.append(junction)
                 break
     result.junctions = confirmed
-    return result
 
 
 def fill(context: Any, event: Any, area: Any, region: Any) -> bool:
@@ -120,7 +130,8 @@ def fill(context: Any, event: Any, area: Any, region: Any) -> bool:
     return start(context, event, area, region)
 
 
-def _write_samples(obj: Any, values: list[Sample]) -> None:
+def write_samples(obj: Any, values: list[Sample]) -> None:
+    """Rebuild a pipe along world-space samples, keeping its transform, profile, colour, and materials."""
     inverse: Any = obj.matrix_world.inverted_safe()
     scale: float = _radius_scale(obj)
     local: list[Sample] = []
@@ -146,124 +157,3 @@ def _write_samples(obj: Any, values: list[Sample]) -> None:
     for sample in local:
         flattened.extend((*sample.position, sample.radius, sample.hardness, sample.opacity, *sample.normal))
     obj["drawing_samples"] = flattened
-
-
-def trim(context: Any, obj: Any, position: Vec3) -> bool:
-    if layers.object_locked(context, obj):
-        return False
-    objects: list[Any] = pipe_objects(context)
-    if obj not in objects:
-        return False
-    paths: list[list[Sample]] = []
-    item: Any
-    for item in objects:
-        paths.append(samples(item))
-    topology: Network = network(objects)
-    path_index: int = objects.index(obj)
-    path: list[Sample] = paths[path_index]
-    parameter: float = 0.0
-    distance: float = math.inf
-    index: int
-    for index in range(len(path) - 1):
-        t: float
-        u: float
-        gap: float
-        t, u, gap = closest(path[index].position, path[index + 1].position, position, position)
-        if gap < distance:
-            parameter, distance = index + t, gap
-    parts: list[list[Sample]] | None = trim_parts(topology, path_index, parameter)
-    if parts is None:
-        get_state().status = "No physical pipe junction bounds this stroke"
-        return False
-    if not parts:
-        mesh: Any = obj.data
-        bpy.data.objects.remove(obj, do_unlink=True)
-        if mesh.users == 0:
-            bpy.data.meshes.remove(mesh)
-    else:
-        if len(parts) > 1:
-            split: Any = obj.copy()
-            split.data = obj.data.copy()
-            owner: Any
-            for owner in obj.users_collection:
-                owner.objects.link(split)
-            _write_samples(split, parts[1])
-        _write_samples(obj, parts[0])
-    get_state().status = "Trimmed between physical pipe junctions"
-    return True
-
-
-class DRAWING_OT_pipe_trim(bpy.types.Operator):
-    bl_idname: str = "drawing.pipe_trim"
-    bl_label: str = "Trim pipe strokes"
-    bl_options: set[str] = {"UNDO"}
-    points: list[tuple[float, float]]
-    area: Any
-    region: Any
-    handle: Any
-
-    def invoke(self, context: Any, event: Any) -> set[str]:
-        self.points = [(float(event.mouse_x), float(event.mouse_y))]
-        self.area, self.region = context.area, context.region
-        self.handle = bpy.types.SpaceView3D.draw_handler_add(self.draw_gesture, (), "WINDOW", "POST_PIXEL")
-        context.window_manager.modal_handler_add(self)
-        return {"RUNNING_MODAL"}
-
-    def draw_gesture(self) -> None:
-        from ..ui import paint
-
-        if bpy.context.area == self.area:
-            point: tuple[float, float]
-            points: list[tuple[float, float]] = []
-            for point in self.points:
-                points.append((point[0] - self.region.x, point[1] - self.region.y))
-            paint.line(points)
-
-    def cancel(self, context: Any) -> None:
-        bpy.types.SpaceView3D.draw_handler_remove(self.handle, "WINDOW")
-        self.area.tag_redraw()
-
-    def modal(self, context: Any, event: Any) -> set[str]:
-        if event.type in ("ESC", "RIGHTMOUSE", "WINDOW_DEACTIVATE"):
-            self.cancel(context)
-            return {"CANCELLED"}
-        if event.type in ("MOUSEMOVE", "INBETWEEN_MOUSEMOVE", "LEFTMOUSE"):
-            self.points.append((float(event.mouse_x), float(event.mouse_y)))
-            self.area.tag_redraw()
-        if event.type == "LEFTMOUSE" and event.value == "RELEASE":
-            self.cancel(context)
-            hits: dict[str, Vec3] = {}
-            index: int
-            for index in range(len(self.points) - 1):
-                a: tuple[float, float] = self.points[index]
-                b: tuple[float, float] = self.points[index + 1]
-                steps: int = max(1, math.ceil(math.hypot(b[0] - a[0], b[1] - a[1]) / 3.0))
-                step: int
-                for step in range(steps + 1):
-                    pointer: tuple[float, float] = (
-                        a[0] + (b[0] - a[0]) * step / steps,
-                        a[1] + (b[1] - a[1]) * step / steps,
-                    )
-                    origin: Any
-                    direction: Any
-                    origin, direction = canvas.ray(event, self.area, self.region, pointer=pointer)
-                    hit: canvas.Hit | None = canvas.object_hit(context, origin, direction)
-                    if hit is not None:
-                        obj: Any = bpy.data.objects.get(hit.source)
-                        if obj is not None and obj.get("drawing_kind") == "pipe":
-                            hits.setdefault(obj.name, hit.position)
-            changed: bool = False
-            name: str
-            position: Vec3
-            for name, position in hits.items():
-                obj = bpy.data.objects.get(name)
-                if obj is not None:
-                    changed = trim(context, obj, position) or changed
-            if not hits and pencil.active(context):
-                bpy.ops.grease_pencil.stroke_trim(
-                    path=[{"loc": (point[0] - self.region.x, point[1] - self.region.y)} for point in self.points]
-                )
-            if changed:
-                pencil._undo_push("Trim pipe strokes")
-            return {"FINISHED"}
-        return {"RUNNING_MODAL"}

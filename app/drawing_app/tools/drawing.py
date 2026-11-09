@@ -8,7 +8,7 @@ from copy import deepcopy
 from typing import Any
 
 from ..core.blender import Vector, bpy
-from ..core.state import AppState, Brush, Vec3, get_state
+from ..core.state import NOZZLE_TOOLS, STROKE_TOOLS, AppState, Brush, Vec3, get_state
 from . import canvas, layers
 from .canvas import Hit, place_cursor
 from .geometry import Face, PaintCache, PipeCache, Sample, paint_mesh, pipe_mesh, resample
@@ -17,8 +17,35 @@ from .surface import PaintSurface
 
 
 def _flat(location: Hit | None) -> Hit | None:
-    """The same point, facing up: the 3D Printer's footprint is horizontal."""
+    """The same point, facing up: a nozzle tool's footprint is horizontal."""
     return Hit(location.position, (0.0, 0.0, 1.0), location.source) if location is not None else None
+
+
+def _nozzle_start(tool: str, context: Any, area: Any, region: Any, location: Hit) -> bool:
+    """Start the 3D Printer's pour or the 3D Extruder's tube at a canvas point."""
+    from . import extruder, printer
+
+    if tool == "extruder":
+        return extruder.start(context, area, region, location)
+    return printer.start(context, area, region, location)
+
+
+def _nozzle_aim(tool: str, location: Hit | None) -> None:
+    from . import extruder, printer
+
+    if tool == "extruder":
+        extruder.aim(location)
+    else:
+        printer.aim(location)
+
+
+def _nozzle_release(tool: str) -> None:
+    from . import extruder, printer
+
+    if tool == "extruder":
+        extruder.release()
+    else:
+        printer.release()
 
 
 def material(brush: Brush) -> Any:
@@ -131,8 +158,9 @@ class DrawingController:
         self._paint_surface: PaintSurface | None = None
         self._pipe_cache: PipeCache | None = None
         self._uploaded_samples: int = 0
-        # 3D Printer: the button is held and material is flowing; the start is the canvas it follows.
+        # 3D Printer or 3D Extruder: the button is held and material is flowing; the start is the canvas it follows.
         self._pouring: bool = False
+        self._pour_tool: str = ""
         self._pour_start: Hit | None = None
 
     @property
@@ -160,7 +188,7 @@ class DrawingController:
         radius: float = state.brush.radius / max(1e-12, float(context.scene.unit_settings.scale_length))
         location: Hit | None = canvas.hit(context, event, area, region, placing=state.cursor_placing)
         recognized: str = ""
-        if state.tool == "printer" and not state.cursor_placing:
+        if state.tool in NOZZLE_TOOLS and not state.cursor_placing:
             # Material falls straight down, so the nozzle's footprint lies flat.
             self._preview.update(area, region, _flat(location), radius)
             return location
@@ -172,7 +200,7 @@ class DrawingController:
         return location
 
     def begin(self, context: Any, event: Any, area: Any, region: Any) -> bool:
-        if self.is_drawing or get_state().tool not in ("paint", "pipe", "printer"):
+        if self.is_drawing or get_state().tool not in STROKE_TOOLS:
             return False
         location: Hit | None = self._target(context, event, area, region)
         if location is None:
@@ -185,12 +213,11 @@ class DrawingController:
         if not self._undo_started and bpy.ops.ed.undo_push.poll():
             bpy.ops.ed.undo_push(message="Drawing session")
             self._undo_started = True
-        if get_state().tool == "printer":
-            from . import printer
-
+        if get_state().tool in NOZZLE_TOOLS:
             self._area, self._region, self._scene = area, region, context.scene
             self._pour_start = location
-            self._pouring = printer.start(context, area, region, location)
+            self._pour_tool = get_state().tool
+            self._pouring = _nozzle_start(self._pour_tool, context, area, region, location)
             return True
         self._brush = deepcopy(get_state().brush)
         self._kind = get_state().tool
@@ -290,19 +317,15 @@ class DrawingController:
         return canvas.hit(context, event, self._area, self._region)
 
     def _stop_pour(self) -> None:
-        """Stop the flow; particles already falling still land and the print keeps forming."""
-        from . import printer
-
+        """Stop the flow; material already falling still lands and the print or tube keeps forming."""
         if self._pouring:
-            printer.release()
+            _nozzle_release(self._pour_tool)
         self._pouring = False
         self._pour_start = None
 
     def handle(self, context: Any, event: Any, area: Any, region: Any) -> bool:
         if self._pouring:
-            from . import printer
-
-            if context.scene != self._scene or get_state().tool != "printer":
+            if context.scene != self._scene or get_state().tool != self._pour_tool:
                 self._stop_pour()
                 return False
             if (event.type == "ESC" and event.value == "PRESS") or (
@@ -312,7 +335,7 @@ class DrawingController:
                 return True
             if event.type in ("MOUSEMOVE", "INBETWEEN_MOUSEMOVE"):
                 location: Hit | None = self._pour_location(context, event)
-                printer.aim(location)
+                _nozzle_aim(self._pour_tool, location)
                 radius: float = get_state().brush.radius / max(1e-12, float(context.scene.unit_settings.scale_length))
                 self._preview.update(self._area, self._region, _flat(location), radius)
                 return True
@@ -370,9 +393,7 @@ class DrawingController:
             state.status = "Cursor placement cancelled"
             self._preview.clear()
             return True
-        if event.type in ("MOUSEMOVE", "INBETWEEN_MOUSEMOVE") and (
-            state.tool in ("paint", "pipe", "printer") or state.cursor_placing
-        ):
+        if event.type in ("MOUSEMOVE", "INBETWEEN_MOUSEMOVE") and (state.tool in STROKE_TOOLS or state.cursor_placing):
             now: float = time.monotonic()
             if now - self._last_hover >= 1.0 / 60.0:
                 self._target(context, event, area, region)

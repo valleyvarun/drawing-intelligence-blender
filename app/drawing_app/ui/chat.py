@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, field
 
 from .. import agent
+from ..agent.attachments import Attachment
 from ..agent.session import MODES, Account, ChatSession, ModelChoice, Status
 from ..agent.transcript import (
     Approval,
@@ -36,6 +37,10 @@ HEADER: float = 30.0
 INPUT_LINES: int = 6
 DETAIL_LINES: int = 14
 TOOLBAR: float = 22.0
+# Attachment chips above the message box.
+CHIP: float = 22.0
+CHIP_GAP: float = 4.0
+CHIP_WIDTH: float = 150.0
 
 BACKGROUND: paint.Color = (0.13, 0.14, 0.145, 1.0)
 BUBBLE: paint.Color = (0.21, 0.22, 0.24, 1.0)
@@ -61,6 +66,8 @@ FALLBACK_MODELS: tuple[ModelChoice, ...] = (
     ModelChoice("sonnet", "Sonnet", "", tuple(EFFORTS)),
     ModelChoice("haiku", "Haiku", "", tuple(EFFORTS)),
 )
+# What each attachment is, shown on its chip.
+KINDS: dict[str, str] = {"image": "Image", "document": "PDF", "text": "Text", "file": "File"}
 STATUS: dict[Status, tuple[str, paint.Color]] = {
     "idle": ("Ready", paint.MUTED),
     "starting": ("Starting…", BLUE),
@@ -157,6 +164,8 @@ class ChatPanel:
         self.limit: float = 0.0
         # Transcript area, for routing the mouse wheel.
         self.bounds: Rect = (0.0, 0.0, 0.0, 0.0)
+        # The + button, where its Add context menu opens.
+        self.add_bounds: Rect = (0.0, 0.0, 0.0, 0.0)
         self.expanded: set[int] = set()
         self._content: float = 0.0
         self._transcript: int = 0
@@ -210,10 +219,20 @@ class ChatPanel:
     def _layout(self, entry: Entry, width: float, session: ChatSession) -> Layout:
         layout: Layout = Layout(0.0)
         if isinstance(entry, UserMessage):
-            lines: list[str] = self._wrap(entry.text, width - 16)
-            layout.pieces.append(Piece("box", 0, 0, width, len(lines) * LINE + 12, color=BUBBLE))
+            lines: list[str] = self._wrap(entry.text, width - 16) if entry.text else []
+            rows: float = len(lines) * LINE + len(entry.attachments) * (CHIP + 2)
+            layout.pieces.append(Piece("box", 0, 0, width, rows + 12, color=BUBBLE))
             layout.height = 6
-            self._text(layout, entry.text, 8, width - 16, paint.TEXT)
+            if entry.text:
+                self._text(layout, entry.text, 8, width - 16, paint.TEXT)
+            name: str
+            for name in entry.attachments:
+                # Each file or context sent with the message, as a chip inside the bubble.
+                # A little room to spare: measured and drawn widths can differ by a pixel.
+                chip: float = min(width - 16, paint.measure(name, SIZE) + 22)
+                layout.pieces.append(Piece("box", 8, layout.height, chip, CHIP, color=CODE))
+                layout.pieces.append(Piece("text", 16, layout.height + 3, chip - 12, text=name, color=paint.MUTED))
+                layout.height += CHIP + 2
             layout.height += 6
         elif isinstance(entry, AssistantText):
             code: bool
@@ -391,8 +410,35 @@ class ChatPanel:
         paint.polygon([(x + w - 15, y + 14), (x + w - 7, y + 14), (x + w - 11, y + 9)], paint.MUTED)
         widgets.append(Widget(key, (x, y, w, TOOLBAR), "popup", entries, tooltip=tip))
 
+    def _add(self, x: float, y: float, widgets: list[Widget]) -> None:
+        """The + button: upload files, add app context, or let Claude browse the web."""
+        web: bool = get_state().agent_web
+        rect: Rect = (x, y, TOOLBAR, TOOLBAR)
+        self.add_bounds = rect
+        self._frame(rect, "+")
+        entries: list[MenuItem] = [
+            ("    Upload from computer…", "agent", ("upload",)),
+            ("    Add context  ›", "chat", ("context_menu",)),
+            (("✓ " if web else "    ") + "Browse the web", "agent", ("web", not web)),
+        ]
+        widgets.append(
+            Widget("chat_add", rect, "popup", entries, tooltip="Attach files and context, or browse the web")
+        )
+
+    @staticmethod
+    def context_menu() -> list[MenuItem]:
+        """The Add context menu: what the user sees or has chosen in the app."""
+        return [
+            ("Viewport screenshot", "agent", ("context", "viewport")),
+            ("Selected objects", "agent", ("context", "selection")),
+            ("Scene summary", "agent", ("context", "scene")),
+        ]
+
     def _toolbar(self, x: float, y: float, w: float, session: ChatSession, widgets: list[Widget]) -> None:
-        """Permission mode and model choices under the message box, as in the VS Code extension."""
+        """The + button, then permission mode and model choices under the message box, as in the VS Code extension."""
+        self._add(x, y, widgets)
+        x += TOOLBAR + 6
+        w -= TOOLBAR + 6
         state: AppState = get_state()
         mode: str = state.agent_mode or session.permission_mode or "default"
         modes: list[MenuItem] = []
@@ -506,16 +552,58 @@ class ChatPanel:
                 paint.line([(cursor, line_y - 2), (cursor, line_y + 12)], paint.TEXT, 1.2)
         widgets.append(Widget("chat_input", (x, y, w - 34, height), "agent", value, kind="chat"))
         busy: bool = session.status != "idle"
+        # Attachments can be sent on their own.
+        ready: bool = bool(value.strip() or session.attachments)
         button: Rect = (x + w - 31, y + 5, 26, 26)
-        paint.rect(button[0], button[1], button[2], button[3], ACCENT if value.strip() or not busy else BUBBLE, 6)
+        paint.rect(button[0], button[1], button[2], button[3], ACCENT if ready or not busy else BUBBLE, 6)
         cx: float = button[0] + button[2] / 2
         cy: float = button[1] + button[3] / 2
-        if busy and not value.strip():
+        if busy and not ready:
             paint.rect(cx - 4.5, cy - 4.5, 9, 9, paint.TEXT, 1)
             widgets.append(Widget("chat_send", button, "agent", ("stop",), tooltip="Stop"))
         else:
             paint.polygon([(cx - 6, cy - 3), (cx + 6, cy - 3), (cx, cy + 5)], (1, 1, 1, 1))
             widgets.append(Widget("chat_send", button, "chat", ("send",), tooltip="Send (Enter)"))
+        return height
+
+    def _attachments(self, x: float, y: float, w: float, session: ChatSession, widgets: list[Widget]) -> float:
+        """Chips for the files and context waiting to be sent, from `y` up; returns their height.
+
+        Each chip shows the attachment's name; its cross removes it.
+        """
+        attached: list[Attachment] = session.attachments
+        if not attached:
+            return 0.0
+        labels: list[str] = []
+        rows: list[list[tuple[int, float]]] = [[]]
+        used: float = 0.0
+        index: int
+        attachment: Attachment
+        for index, attachment in enumerate(attached):
+            # The name only; the tooltip says what kind of attachment it is.
+            labels.append(attachment.name)
+            width: float = min(CHIP_WIDTH, w, paint.measure(labels[-1], 11) + 34)
+            if rows[-1] and used + width > w:
+                rows.append([])
+                used = 0.0
+            rows[-1].append((index, width))
+            used += width + CHIP_GAP
+        height: float = len(rows) * (CHIP + CHIP_GAP) - CHIP_GAP
+        row_index: int
+        row: list[tuple[int, float]]
+        for row_index, row in enumerate(rows):
+            left: float = x
+            chip_y: float = y + height - (row_index + 1) * CHIP - row_index * CHIP_GAP
+            for index, width in row:
+                paint.rect(left, chip_y, width, CHIP, (0.07, 0.07, 0.075, 1), 5)
+                paint.rect(left + 1, chip_y + 1, width - 2, CHIP - 2, BUBBLE, 4)
+                paint.text(labels[index], left + 7, chip_y + 6, 11, paint.TEXT, max_width=width - 28)
+                tip: str = KINDS.get(attached[index].kind, "File") + " · " + (attached[index].path or labels[index])
+                widgets.append(Widget(f"chat_attachment_{index}", (left, chip_y, width - 20, CHIP), tooltip=tip))
+                cross: Rect = (left + width - 20, chip_y + 2, 18, CHIP - 4)
+                paint.text("×", cross[0] + 5, chip_y + 5, 12, paint.MUTED)
+                widgets.append(Widget(f"chat_detach_{index}", cross, "agent", ("detach", index), tooltip="Remove"))
+                left += width + CHIP_GAP
         return height
 
     def _empty(
@@ -580,7 +668,9 @@ class ChatPanel:
         self._header(x + 3, y + h - 3, w - 6, session, widgets)
         self._toolbar(x + 6, y + 6, w - 12, session, widgets)
         input_height: float = self._input(x + 6, y + 6 + TOOLBAR + 4, w - 12, edit, session, widgets)
-        bottom: float = y + 6 + TOOLBAR + 4 + input_height + 8
+        chips_y: float = y + 6 + TOOLBAR + 4 + input_height + 6
+        chips: float = self._attachments(x + 6, chips_y, w - 12, session, widgets)
+        bottom: float = chips_y + 2 + (chips + 6 if chips else 0.0)
         top: float = y + h - 3 - HEADER - 6
         self.bounds = (x, bottom, w, max(0.0, top - bottom))
         width: float = w - 2 * PAD

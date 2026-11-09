@@ -54,7 +54,7 @@ Args:
 
 ```python
 @tool()
-def set_tool(tool: Literal['select', 'move', 'rotate', 'scale', 'paint', 'pipe', 'printer', 'grease']) -> JsonObject
+def set_tool(tool: Literal['select', 'move', 'rotate', 'scale', 'paint', 'pipe', 'printer', 'extruder', 'grease']) -> JsonObject
 ```
 
 ```text
@@ -62,14 +62,15 @@ Switch the app's active tool, as clicking it in the Tool Box does.
 
 Args:
     tool: "select", "move", "rotate", "scale", "paint", "pipe", "printer" (3D Printer, which pours
-        material that settles into a mesh), or "grease" (Grease Pencil Draw).
+        material that settles into a mesh), "extruder" (3D Extruder, which squeezes out a tube that
+        falls, stacks, and coils like toothpaste), or "grease" (Grease Pencil Draw).
 ```
 
 ### `set_color`
 
 ```python
 @tool()
-def set_color(color: str, tool: Literal['all', 'paint', 'pipe', 'printer', 'grease']='all') -> JsonObject
+def set_color(color: str, tool: Literal['all', 'paint', 'pipe', 'printer', 'extruder', 'grease']='all') -> JsonObject
 ```
 
 ```text

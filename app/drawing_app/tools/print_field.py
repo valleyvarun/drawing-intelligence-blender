@@ -3,6 +3,9 @@
 Pure numpy, without Blender, so it can be tested on its own. Coordinates are the print object's local
 units: column (i, j) covers x from origin_x + i * cell to the next column, and y likewise. A column's
 floor is the surface its first material landed on, UNKNOWN until the printer has looked down for it.
+
+How far material spreads depends on its stickiness, from 0 to 1: loose material slumps like sand, and
+sticky material stands steeply where it lands and grips the surface below, so it builds up instead.
 """
 
 from __future__ import annotations
@@ -17,8 +20,14 @@ np: Any = import_module("numpy")
 UNKNOWN: float = -1.0e30
 # Grids larger than this on a side are coarsened, so long strokes stay fast.
 MAX_SIDE: int = 400
-# Material slides down steps steeper than its angle of repose.
-REPOSE: float = math.tan(math.radians(34.0))
+# Material slides down steps steeper than its angle of repose: sand's at stickiness 0, rising to
+# STICKY_ANGLE (almost upright) at 1.
+SAND_ANGLE: float = 34.0
+STICKY_ANGLE: float = 80.0
+REPOSE: float = math.tan(math.radians(SAND_ANGLE))
+# At stickiness 1, a layer this many columns thick grips the surface below and never slides, even off a steep
+# face or an edge; less sticky material grips less.
+GRIP: float = 2.0
 # Share of a too-steep step that moves to each lower neighbour in one relaxation step. With eight
 # neighbours a column gives at most 80% of its excess, so it never ends up below the columns it fed.
 RATE: float = 0.1
@@ -38,6 +47,12 @@ SIDES: tuple[tuple[int, int, float], ...] = (
     (-1, 1, math.sqrt(2.0)),
     (-1, -1, math.sqrt(2.0)),
 )
+
+
+def repose(sticky: float) -> float:
+    """The steepest slope (rise over run) material of this stickiness stands at."""
+    share: float = max(0.0, min(1.0, sticky))
+    return math.tan(math.radians(SAND_ANGLE + (STICKY_ANGLE - SAND_ANGLE) * share))
 
 
 def _shifted(values: Any, di: int, dj: int, fill: object) -> Any:
@@ -61,24 +76,27 @@ def _add_shifted(target: Any, values: Any, di: int, dj: int) -> None:
 
 
 class HeightField:
-    def __init__(self, origin: tuple[float, float], cell: float, height: Any, base: Any) -> None:
+    def __init__(self, origin: tuple[float, float], cell: float, height: Any, base: Any, sticky: float = 0.0) -> None:
         self.origin: tuple[float, float] = origin
         self.cell: float = cell
         self.height: Any = height
         self.base: Any = base
+        # 0 slumps like sand; 1 stands almost upright and grips the surface below.
+        self.sticky: float = max(0.0, min(1.0, sticky))
 
     @classmethod
-    def empty(cls, center: tuple[float, float], cell: float, side: int = 64) -> HeightField:
+    def empty(cls, center: tuple[float, float], cell: float, side: int = 64, sticky: float = 0.0) -> HeightField:
         half: float = side * cell / 2.0
         return cls(
             (center[0] - half, center[1] - half),
             cell,
             np.zeros((side, side), dtype=np.float64),
             np.full((side, side), UNKNOWN, dtype=np.float64),
+            sticky,
         )
 
     @classmethod
-    def restore(cls, grid: list[float], height: Any, base: Any) -> HeightField | None:
+    def restore(cls, grid: list[float], height: Any, base: Any, sticky: float = 0.0) -> HeightField | None:
         """A field saved as grid = [origin x, origin y, cell, columns along x, columns along y]."""
         if len(grid) != 5 or not all(math.isfinite(value) for value in grid) or grid[2] <= 0.0:
             return None
@@ -91,6 +109,7 @@ class HeightField:
             grid[2],
             np.asarray(height, dtype=np.float64).reshape(nx, ny).copy(),
             np.asarray(base, dtype=np.float64).reshape(nx, ny).copy(),
+            sticky,
         )
 
     def grid(self) -> list[float]:
@@ -252,6 +271,51 @@ class HeightField:
         inside: Any = self.inside(i, j)
         self.deposit(i[inside], j[inside], volume / (side * side * self.cell * self.cell))
 
+    def dig(self, points: Any, radii: Any) -> bool:
+        """Erase the material inside balls around local `points` (N, 3) with `radii` (N,); returns whether any went.
+
+        A column whose top lies inside a ball is lowered to the ball's bottom. A height field cannot hold an
+        overhang, so a column whose top is above a ball keeps the material under its top.
+        """
+        centres: Any = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        sizes: Any = np.broadcast_to(np.asarray(radii, dtype=np.float64), (len(centres),))
+        known: Any = self.known()
+        changed: bool = False
+        point: Any
+        size: float
+        for point, size in zip(centres, sizes, strict=True):
+            low: tuple[Any, Any] = self.index(point[0] - size, point[1] - size)
+            high: tuple[Any, Any] = self.index(point[0] + size, point[1] + size)
+            i0: int = max(0, int(low[0]))
+            j0: int = max(0, int(low[1]))
+            i1: int = min(self.shape[0], int(high[0]) + 1)
+            j1: int = min(self.shape[1], int(high[1]) + 1)
+            if i0 >= i1 or j0 >= j1:
+                continue
+            x: Any
+            y: Any
+            x, y = self.center(np.arange(i0, i1)[:, None], np.arange(j0, j1)[None, :])
+            gap: Any = (x - point[0]) ** 2 + (y - point[1]) ** 2
+            half: Any = np.sqrt(np.maximum(size * size - gap, 0.0))
+            height: Any = self.height[i0:i1, j0:j1]
+            base: Any = self.base[i0:i1, j0:j1]
+            top: Any = base + height
+            within: Any = (
+                (gap < size * size)
+                & known[i0:i1, j0:j1]
+                & (height > self.cell * THIN)
+                & (top <= point[2] + half)
+                & (top >= point[2] - half)
+            )
+            if within.any():
+                lowered: Any = np.maximum(point[2] - half - base, 0.0)
+                height[within] = np.minimum(height[within], lowered[within])
+                changed = True
+        if changed:
+            np.maximum(self.height, 0.0, out=self.height)
+            self.height[self.height <= self.cell * THIN] = 0.0
+        return changed
+
     def floors_needed(self, limit: int) -> tuple[Any, Any, Any]:
         """Columns beside material whose floor is unknown, and the height to look down from (just above it)."""
         bounds: tuple[int, int, int, int] | None = self.bounds()
@@ -283,7 +347,10 @@ class HeightField:
         return ii + i0, jj + j0, highest[ii, jj] + self.cell
 
     def relax(self, iterations: int) -> float:
-        """Let material slide off steps steeper than its angle of repose; returns the thickness moved."""
+        """Let material slide off steps steeper than its angle of repose; returns the thickness moved.
+
+        The bottom of each column, as thick as the stickiness's grip, holds onto the surface below and stays.
+        """
         bounds: tuple[int, int, int, int] | None = self.bounds()
         if bounds is None:
             return 0.0
@@ -300,7 +367,8 @@ class HeightField:
         base: Any = self.base[i0:i1, j0:j1]
         known: Any = base > UNKNOWN * 0.5
         floor: Any = np.where(known, base, 0.0)
-        step: float = REPOSE * self.cell
+        step: float = repose(self.sticky) * self.cell
+        grip: float = self.sticky * GRIP * self.cell
         moved: float = 0.0
         di: int
         dj: int
@@ -320,8 +388,9 @@ class HeightField:
             total: Any = np.zeros_like(height)
             for flow in flows:
                 total += flow
-            # A column cannot give more material than it holds.
-            share: Any = np.where(total > height, height / np.maximum(total, 1e-300), 1.0)
+            # A column cannot give more material than it holds above its grip.
+            loose: Any = np.maximum(height - grip, 0.0)
+            share: Any = np.where(total > loose, loose / np.maximum(total, 1e-300), 1.0)
             for flow in flows:
                 flow *= share
             height -= total * share

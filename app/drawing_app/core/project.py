@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .blender import bpy
-from .state import ROOT, get_state, restore_brushes, restore_pencil, restore_printer
+from .state import ROOT, get_state, restore_brushes, restore_extruder, restore_pencil, restore_printer
 
 SCENE_STATE: str = "drawing_app_state"
 # Blender writes compressed .blend files as Zstandard frames.
@@ -68,7 +68,7 @@ def persist_scene() -> None:
     data: dict[str, object] = asdict(get_state())
     # Personal agent settings stay in local preferences, not in drawings that may be shared.
     key: str
-    for key in ("agent_cli", "agent_model", "agent_mode", "agent_effort"):
+    for key in ("agent_cli", "agent_model", "agent_mode", "agent_effort", "agent_web"):
         data.pop(key, None)
     if not bpy.app.background:
         from ..ui.layout import role
@@ -141,6 +141,7 @@ def restore_scene() -> None:
         restore_brushes(data.get("brushes"))
         restore_pencil(data.get("pencil"))
         restore_printer(data.get("printer"))
+        restore_extruder(data.get("extruder"))
     except (ValueError, TypeError, AttributeError):
         get_state().status = "Project drawing preferences could not be restored."
 

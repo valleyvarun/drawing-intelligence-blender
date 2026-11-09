@@ -5,10 +5,13 @@ nozzle's circle. They fall under gravity and land on the print, on another objec
 (height 0). Each landing adds its volume to a column of the print's height field (print_field.py),
 which slumps to its angle of repose and becomes the object's mesh a few times a second. A timer runs
 this on its own, so the print keeps forming after the stroke; one undo step is pushed when it settles.
+How far it slumps is the Sticky setting: loose material spreads like sand, and sticky material stands
+steeply and grips the surface below, so it builds up where it lands.
 
-A pour joins the active group's print of the same colour when it starts on or near it. Its columns only
-grow, so pouring with the pointer below an earlier print still adds height on top of it. Another colour
-makes a new print object, released above every print under the nozzle so that it lands on top of them.
+A pour joins the active group's print of the same colour and stickiness when it starts on or near it. Its columns only
+grow, so pouring with the pointer below an earlier print still adds height on top of it. Another colour or
+stickiness makes a new print object (so earlier material keeps its shape), released above every print and 3D Extruder tube under the nozzle so that it lands
+on top of them.
 
 Particles fall in drops: each drop releases `per_drop` particles at once across the nozzle's circle, and
 drops follow each other so that `rate` particles fall per second. A particle is a block `size` wide (at
@@ -44,6 +47,8 @@ QUIET_TICKS: int = 20  # ticks without movement before the print counts as settl
 SETTLE_TIMEOUT: float = 8.0  # seconds after the last landing
 FALL_LIMIT: float = 6.0  # seconds a particle may fall before it is dropped
 KIND: str = "print"
+# Kinds of printed objects: the 3D Printer's prints and the 3D Extruder's tubes.
+PRINTED: tuple[str, ...] = (KIND, "extrusion")
 DOWN: Any = Vector((0.0, 0.0, -1.0))
 
 
@@ -86,13 +91,18 @@ _RANDOM: Any = np.random.default_rng()
 _LAST_ERROR: str = ""
 
 
-def _units(context: Any) -> float:
+def units(context: Any) -> float:
     """Metres per Blender unit."""
     return max(float(context.scene.unit_settings.scale_length), 1e-12)
 
 
 def is_print(obj: Any) -> bool:
     return obj is not None and obj.type == "MESH" and obj.get("drawing_kind") == KIND
+
+
+def is_printed(obj: Any) -> bool:
+    """A 3D Printer print or a 3D Extruder tube: material that later pours and tubes land on top of."""
+    return obj is not None and obj.type == "MESH" and obj.get("drawing_kind") in PRINTED
 
 
 def field_of(obj: Any) -> HeightField | None:
@@ -110,8 +120,11 @@ def field_of(obj: Any) -> HeightField | None:
     value: Any
     for value in grid:
         values.append(float(value))
+    # Prints from before the Sticky setting slumped like sand.
+    stored: Any = obj.get("drawing_print_sticky", 0.0)
+    sticky: float = float(stored) if isinstance(stored, (int, float)) else 0.0
     field: HeightField | None = HeightField.restore(
-        values, np.asarray(height, dtype=np.float64), np.asarray(base, dtype=np.float64)
+        values, np.asarray(height, dtype=np.float64), np.asarray(base, dtype=np.float64), sticky
     )
     if field is not None:
         _FIELDS[key] = field
@@ -122,14 +135,26 @@ def _save(obj: Any, field: HeightField) -> None:
     obj["drawing_print_grid"] = field.grid()
     obj["drawing_print_height"] = field.height.ravel().tolist()
     obj["drawing_print_base"] = field.base.ravel().tolist()
+    obj["drawing_print_sticky"] = field.sticky
 
 
-def _write_mesh(job: Job) -> None:
+def store(obj: Any, field: HeightField) -> None:
+    """Write a print's mesh and saved field after it was changed outside a pour, such as by erasing."""
     vertices: Any
     loops: Any
     starts: Any
-    vertices, loops, starts = job.field.mesh()
-    mesh: Any = job.obj.data
+    vertices, loops, starts = field.mesh()
+    fill_mesh(obj.data, vertices, loops, starts)
+    _save(obj, field)
+
+
+def forget(obj: Any) -> None:
+    """Drop the cached field of a print that is about to be deleted."""
+    _FIELDS.pop(int(obj.as_pointer()), None)
+
+
+def fill_mesh(mesh: Any, vertices: Any, loops: Any, starts: Any) -> None:
+    """Replace a mesh's geometry with polygons given as loop vertex indices and loop starts, smooth shaded."""
     mesh.clear_geometry()
     if len(starts):
         mesh.vertices.add(len(vertices))
@@ -142,20 +167,29 @@ def _write_mesh(job: Job) -> None:
         mesh.shade_smooth()
     else:
         mesh.update()
+
+
+def _write_mesh(job: Job) -> None:
+    vertices: Any
+    loops: Any
+    starts: Any
+    vertices, loops, starts = job.field.mesh()
+    fill_mesh(job.obj.data, vertices, loops, starts)
     job.changed = False
     job.last_mesh = time.monotonic()
 
 
-def _material(color: Vec3) -> Any:
-    material: Any = bpy.data.materials.new("3D Print")
-    material.diffuse_color = (*color, 1.0)
+def material(name: str, color: Vec3, roughness: float) -> Any:
+    """A new opaque material of one colour, for printed objects."""
+    result: Any = bpy.data.materials.new(name)
+    result.diffuse_color = (*color, 1.0)
     node: Any
-    for node in material.node_tree.nodes:
+    for node in result.node_tree.nodes:
         if node.type == "BSDF_PRINCIPLED":
             node.inputs["Base Color"].default_value = (*color, 1.0)
-            node.inputs["Roughness"].default_value = 0.8
+            node.inputs["Roughness"].default_value = roughness
             break
-    return material
+    return result
 
 
 def _columns(context: Any, radius: float, size: float) -> float:
@@ -164,29 +198,30 @@ def _columns(context: Any, radius: float, size: float) -> float:
     Four columns across the nozzle radius, and no narrower than half a particle: large particles then
     land on a few columns each, so slumping keeps up with them instead of leaving a spike to collapse.
     """
-    return max(radius * COLUMN_SHARE, size / 2.0, 0.001 / _units(context))
+    return max(radius * COLUMN_SHARE, size / 2.0, 0.001 / units(context))
 
 
-def _new_print(context: Any, point: Vec3, color: Vec3, cell: float) -> tuple[Any, HeightField]:
+def _new_print(context: Any, point: Vec3, color: Vec3, cell: float, sticky: float) -> tuple[Any, HeightField]:
     mesh: Any = bpy.data.meshes.new("3D Print")
     obj: Any = bpy.data.objects.new("3D Print", mesh)
     layers.link_stroke(obj, context)
     obj["drawing_kind"] = KIND
     obj["drawing_print_color"] = color_hex(color)
     obj.color = (*color, 1.0)
-    mesh.materials.append(_material(color))
-    field: HeightField = HeightField.empty((point[0], point[1]), cell)
+    mesh.materials.append(material("3D Print", color, 0.8))
+    field: HeightField = HeightField.empty((point[0], point[1]), cell, sticky=sticky)
     _FIELDS[int(obj.as_pointer())] = field
     _save(obj, field)
     return obj, field
 
 
-def _find_print(context: Any, point: Vec3, color: Vec3, radius: float, columns: float) -> Any:
-    """The active group's print of this colour and a similar scale that the pour starts on or near, or None.
+def _find_print(context: Any, point: Vec3, color: Vec3, radius: float, columns: float, sticky: float) -> Any:
+    """The active group's print of this colour, stickiness, and a similar scale that the pour starts on or near.
 
     A print whose columns are over twice as wide or narrow as this pour's (`columns`) is left alone: the pour
     starts its own print, which stacks on it, instead of coarsening its detail or landing large particles on
-    columns too narrow for slumping to keep up.
+    columns too narrow for slumping to keep up. So is one of another stickiness, which would slump the earlier
+    material again. Returns None when there is none.
     """
     label: str = color_hex(color)
     best: Any = None
@@ -200,6 +235,8 @@ def _find_print(context: Any, point: Vec3, color: Vec3, radius: float, columns: 
         field: HeightField | None = field_of(obj)
         extent: tuple[float, float, float, float] | None = field.extent() if field is not None else None
         if field is None or extent is None or not columns / 2.0 <= field.cell <= columns * 2.0:
+            continue
+        if abs(field.sticky - sticky) > 0.005:
             continue
         local: Any = obj.matrix_world.inverted() @ Vector(point)
         gap: float = math.hypot(
@@ -216,13 +253,13 @@ def _configure(job: Job, context: Any) -> None:
     state: AppState = get_state()
     brush: Brush = state.brushes["printer"]
     settings: Printer = state.printer
-    units: float = _units(context)
-    job.radius = max(1e-5, brush.radius / units)
-    job.drop = settings.drop / units
-    job.gravity = GRAVITY / units
+    scale: float = units(context)
+    job.radius = max(1e-5, brush.radius / scale)
+    job.drop = settings.drop / scale
+    job.gravity = GRAVITY / scale
     job.rate = max(1.0, settings.rate)
     job.per_drop = max(1, int(settings.per_drop))
-    job.size = max(1e-6, settings.particle(brush.radius) / units)
+    job.size = max(1e-6, settings.particle(brush.radius) / scale)
     # A cube of material: it adds its own width in height over its footprint.
     job.particle_volume = job.size**3
 
@@ -231,11 +268,12 @@ def start(context: Any, area: Any, region: Any, hit: Hit) -> bool:
     """Start pouring at a canvas point; a print still forming elsewhere settles at once."""
     global _JOB
     brush: Brush = get_state().brushes["printer"]
-    units: float = _units(context)
-    radius: float = max(1e-5, brush.radius / units)
-    columns: float = _columns(context, radius, get_state().printer.particle(brush.radius) / units)
+    scale: float = units(context)
+    radius: float = max(1e-5, brush.radius / scale)
+    columns: float = _columns(context, radius, get_state().printer.particle(brush.radius) / scale)
     color: Vec3 = brush.color
-    obj: Any = _find_print(context, hit.position, color, radius, columns)
+    sticky: float = get_state().printer.sticky
+    obj: Any = _find_print(context, hit.position, color, radius, columns, sticky)
     if _JOB is not None and (obj is None or _JOB.obj != obj):
         finish_now()
     job: Job | None = _JOB
@@ -243,7 +281,7 @@ def start(context: Any, area: Any, region: Any, hit: Hit) -> bool:
         created: bool = obj is None
         field: HeightField
         if obj is None:
-            obj, field = _new_print(context, hit.position, color, columns)
+            obj, field = _new_print(context, hit.position, color, columns, sticky)
         else:
             found: HeightField | None = field_of(obj)
             if found is None:
@@ -293,7 +331,12 @@ def _world_z(obj: Any, x: float, y: float, z: float) -> float:
     return float((obj.matrix_world @ Vector((x, y, z))).z)
 
 
-def _floor_below(context: Any, depsgraph: Any, start: Any, skip: str) -> float | None:
+def ignored(obj: Any, skip: str) -> bool:
+    """Material passes through the object named `skip` (the one forming) and the drawing helpers."""
+    return bool(obj.name == skip or obj.get("drawing_plane") or obj.get("drawing_preview") or obj.get("drawing_helper"))
+
+
+def floor_below(context: Any, depsgraph: Any, start: Any, skip: str) -> float | None:
     """Height of the first surface below `start`, ignoring the print itself and drawing helpers."""
     origin: Any = start.copy()
     _attempt: int
@@ -301,8 +344,7 @@ def _floor_below(context: Any, depsgraph: Any, start: Any, skip: str) -> float |
         result: Any = context.scene.ray_cast(depsgraph, origin, DOWN)
         if not result[0]:
             return None
-        obj: Any = result[4]
-        if obj.name == skip or obj.get("drawing_plane") or obj.get("drawing_preview") or obj.get("drawing_helper"):
+        if ignored(result[4], skip):
             origin = result[1] + DOWN * 1e-5
             continue
         return float(result[1].z)
@@ -323,7 +365,7 @@ def _find_floors(job: Job, context: Any, i: Any, j: Any, start: Any) -> None:
     for index in range(len(i)):
         point: Any = matrix @ Vector((float(x[index]), float(y[index]), float(start[index])))
         candidates: list[float] = []
-        found: float | None = _floor_below(context, depsgraph, point, job.obj.name)
+        found: float | None = floor_below(context, depsgraph, point, job.obj.name)
         if found is not None:
             candidates.append(found)
         # The ground plane at height 0 catches everything poured above it.
@@ -344,19 +386,44 @@ def _release_height(job: Job, context: Any, nozzle: Vec3) -> float:
     )
     if found is not None:
         top = max(top, _world_z(job.obj, float(center[0]), float(center[1]), found))
+    others: float | None = printed_top(context, nozzle[0], nozzle[1], reach, job.obj)
+    if others is not None:
+        top = max(top, others)
+    return top + job.drop
+
+
+def printed_top(context: Any, x: float, y: float, reach: float, skip: Any) -> float | None:
+    """Highest surface within `reach` of (x, y) across, when a visible print or tube other than `skip` is there.
+
+    Looks down from the top of those objects' bounds at the centre and four points around it, so a long tube's
+    bounds do not lift the nozzle where the tube is not.
+    """
+    highest: float | None = None
     obj: Any
     for obj in context.scene.objects:
-        if obj == job.obj or not is_print(obj) or not obj.visible_get():
+        if obj == skip or not is_printed(obj) or not obj.visible_get():
             continue
         corners: list[Any] = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
         if (
-            min(float(c.x) for c in corners) <= nozzle[0] + reach
-            and max(float(c.x) for c in corners) >= nozzle[0] - reach
-            and min(float(c.y) for c in corners) <= nozzle[1] + reach
-            and max(float(c.y) for c in corners) >= nozzle[1] - reach
+            min(float(c.x) for c in corners) <= x + reach
+            and max(float(c.x) for c in corners) >= x - reach
+            and min(float(c.y) for c in corners) <= y + reach
+            and max(float(c.y) for c in corners) >= y - reach
         ):
-            top = max(top, max(float(c.z) for c in corners))
-    return top + job.drop
+            bound: float = max(float(c.z) for c in corners)
+            highest = bound if highest is None else max(highest, bound)
+    if highest is None:
+        return None
+    depsgraph: Any = context.evaluated_depsgraph_get()
+    top: float | None = None
+    across: float
+    along: float
+    for across, along in ((0.0, 0.0), (0.7, 0.0), (-0.7, 0.0), (0.0, 0.7), (0.0, -0.7)):
+        start: Any = Vector((x + across * reach, y + along * reach, highest + reach))
+        found: float | None = floor_below(context, depsgraph, start, skip.name)
+        if found is not None:
+            top = found if top is None else max(top, found)
+    return top
 
 
 def _emit(job: Job, context: Any, elapsed: float) -> None:
@@ -428,7 +495,7 @@ def _fall(job: Job, elapsed: float, now: float) -> None:
     job.speeds = job.speeds[keep]
 
 
-def _engaged(job: Job) -> bool:
+def engaged(window: Any) -> bool:
     """Another stroke or modal tool is running; the undo step waits so it does not split it."""
     from ..core import controller
 
@@ -436,21 +503,21 @@ def _engaged(job: Job) -> bool:
     if session is not None and session.drawing.is_drawing:
         return True
     operator: Any
-    for operator in job.window.modal_operators:
+    for operator in window.modal_operators:
         if operator.bl_idname != "DRAWING_OT_session":
             return True
     return False
 
 
-def _undo_push(job: Job) -> None:
+def undo_push(window: Any, area: Any, region: Any, message: str) -> None:
     from ..core.project import persist_scene
 
     if bpy.app.background:
         return
-    with bpy.context.temp_override(window=job.window, area=job.area, region=job.region):
+    with bpy.context.temp_override(window=window, area=area, region=region):
         if bpy.ops.ed.undo_push.poll():
             persist_scene()
-            bpy.ops.ed.undo_push(message="3D print")
+            bpy.ops.ed.undo_push(message=message)
 
 
 def _complete(job: Job, *, push: bool = True) -> None:
@@ -471,11 +538,11 @@ def _complete(job: Job, *, push: bool = True) -> None:
         return
     _write_mesh(job)
     _save(job.obj, job.field)
-    cubic_metres: float = job.field.volume() * _units(bpy.context) ** 3
+    cubic_metres: float = job.field.volume() * units(bpy.context) ** 3
     amount: str = f"{cubic_metres:.2f} m³" if cubic_metres >= 1.0 else f"{cubic_metres * 1.0e6:.1f} cm³"
     get_state().status = f"3D print formed ({amount})"
     if push:
-        _undo_push(job)
+        undo_push(job.window, job.area, job.region, "3D print")
     job.area.tag_redraw()
 
 
@@ -547,7 +614,7 @@ def _tick() -> float | None:
             still: bool = moved < job.field.cell * 1e-3
             job.quiet = 0 if falling or not still else job.quiet + 1
             timed_out: bool = not falling and now - job.last_landing > SETTLE_TIMEOUT
-            if (job.quiet >= QUIET_TICKS or timed_out) and not _engaged(job):
+            if (job.quiet >= QUIET_TICKS or timed_out) and not engaged(job.window):
                 _complete(job)
                 return None
         job.area.tag_redraw()

@@ -213,6 +213,7 @@ def main() -> None:
             "paint": "#00FF00",
             "pipe": "#00FF00",
             "printer": "#00FF00",
+            "extruder": "#00FF00",
             "grease": "#00FF00",
         }
         colors = api.set_color("blue", tool="pipe")

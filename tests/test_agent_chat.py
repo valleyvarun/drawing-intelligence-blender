@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 if TYPE_CHECKING:
+    from drawing_app.agent.attachments import Attachment
     from drawing_app.agent.session import ChatSession, Launch
     from drawing_app.agent.transcript import Transcript
 
@@ -98,6 +99,11 @@ FAKE_CLI: str = textwrap.dedent("""
             continue
         turn += 1
         text = message["message"]["content"]
+        if isinstance(text, list):
+            # Attachments arrive as content blocks; the reply echoes only the typed text.
+            Path("content-%d.json" % turn).write_text(json.dumps(text))
+            text = " ".join(block["text"] for block in text
+                            if block["type"] == "text" and not block["text"].startswith("<attachment"))
         emit({"type": "system", "subtype": "init", "session_id": "session-1", "model": "fake-model"})
         if text.startswith("tool"):
             ask("perm-%d" % turn)
@@ -138,8 +144,11 @@ class AgentChatTests(unittest.TestCase):
         setattr(package, "__path__", [])
         transcript: ModuleType = module("_chat.transcript", "app/drawing_app/agent/transcript.py")
         with patch.dict(sys.modules, {"_chat": package, "_chat.transcript": transcript}):
-            self.session_module: ModuleType = module("_chat.session", "app/drawing_app/agent/session.py")
+            attachments: ModuleType = module("_chat.attachments", "app/drawing_app/agent/attachments.py")
+            with patch.dict(sys.modules, {"_chat.attachments": attachments}):
+                self.session_module: ModuleType = module("_chat.session", "app/drawing_app/agent/session.py")
         self.transcript_module: ModuleType = transcript
+        self.attachments: ModuleType = attachments
         self.folder: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory()
         self.root: Path = Path(self.folder.name)
         (self.root / "claude.py").write_text(FAKE_CLI, encoding="utf-8")
@@ -350,6 +359,85 @@ class AgentChatTests(unittest.TestCase):
         )
         self.assertEqual(session.permission_mode, "acceptEdits")
 
+    def test_attachments_travel_inside_the_message_as_content_blocks(self) -> None:
+        session: ChatSession = self.session()
+        picture: Attachment = self.attachments.image("sketch.png", b"\x89PNG fake", "image/png", "C:/art/sketch.png")
+        notes: Attachment = self.attachments.text("Scene summary", '{"objects": 3}')
+        session.attach(picture)
+        session.attach(notes)
+        session.send("  what is this?  ")
+        self.assertEqual(session.attachments, [])
+        self.wait(session, lambda: session.status == "idle")
+        blocks: list[dict[str, object]] = json.loads((self.root / "content-1.json").read_text())
+        kinds: list[object] = [block["type"] for block in blocks]
+        self.assertEqual(kinds, ["text", "image", "text", "text"])
+        self.assertEqual(blocks[0]["text"], '<attachment name="sketch.png" path="C:/art/sketch.png" />')
+        self.assertEqual(blocks[1]["source"], {"type": "base64", "media_type": "image/png", "data": "iVBORyBmYWtl"})
+        self.assertEqual(blocks[2]["text"], '<attachment name="Scene summary">\n{"objects": 3}\n</attachment>')
+        # The typed text comes last, after what it refers to.
+        self.assertEqual(blocks[3], {"type": "text", "text": "what is this?"})
+        message: object = self.entries(session, "UserMessage")[0]
+        self.assertEqual(
+            (getattr(message, "text"), getattr(message, "attachments")),
+            ("what is this?", ["sketch.png", "Scene summary"]),
+        )
+        # Attachments can be sent without any text; plain messages stay plain strings.
+        session.attach(notes)
+        session.send("")
+        self.wait(session, lambda: session.status == "idle" and len(self.entries(session, "UserMessage")) == 2)
+        self.assertEqual([block["type"] for block in json.loads((self.root / "content-2.json").read_text())], ["text"])
+        session.send("")
+        self.assertEqual(len(self.entries(session, "UserMessage")), 2)
+
+    def test_attachments_are_limited_removed_and_forgotten_by_a_new_chat(self) -> None:
+        session: ChatSession = self.session()
+        notes: Attachment = self.attachments.text("a.txt", "x")
+        _index: int
+        for _index in range(self.attachments.MAX_ATTACHMENTS):
+            session.attach(notes)
+        with self.assertRaises(self.attachments.AttachmentError):
+            session.attach(notes)
+        session.detach(0)
+        session.detach(99)
+        self.assertEqual(len(session.attachments), self.attachments.MAX_ATTACHMENTS - 1)
+        session.reset()
+        self.assertEqual(session.attachments, [])
+
+    def test_relaunch_applies_new_launch_settings_and_keeps_the_conversation(self) -> None:
+        web: list[bool] = [False]
+
+        def launch() -> Launch:
+            base: Launch = self.launch()
+            tools: list[str] = ["WebSearch", "WebFetch"]
+            return cast(
+                "Launch",
+                self.session_module.Launch(
+                    command=base.command,
+                    cwd=base.cwd,
+                    allowed_tools=tools if web[0] else [],
+                    disallowed_tools=["AskUserQuestion"] + ([] if web[0] else tools),
+                ),
+            )
+
+        session: ChatSession = self.session(launch)
+        session.send("first")
+        # Asked during the turn, the restart waits for it to end.
+        web[0] = True
+        session.relaunch()
+        self.wait(session, lambda: session.status == "idle" and bool(self.entries(session, "AssistantText")))
+        self.wait(session, lambda: "--resume" in json.loads((self.root / "arguments.json").read_text()))
+        arguments: list[str] = json.loads((self.root / "arguments.json").read_text())
+        self.assertEqual(arguments[arguments.index("--allowedTools") + 1], "WebSearch,WebFetch")
+        self.assertEqual(arguments[arguments.index("--disallowedTools") + 1], "AskUserQuestion")
+        self.assertEqual(arguments[arguments.index("--resume") + 1], "session-1")
+        self.assertTrue(session.running)
+        session.send("second")
+        self.wait(session, lambda: len(self.entries(session, "AssistantText")) == 2 and session.status == "idle")
+        # Not running: the next start reads the settings anyway.
+        session.close()
+        session.relaunch()
+        self.assertFalse(session.running)
+
     def test_default_mode_is_not_passed_as_a_flag(self) -> None:
         def launch() -> Launch:
             base: Launch = self.launch()
@@ -487,6 +575,54 @@ class AgentChatTests(unittest.TestCase):
         transcript.finish_turn()
         self.assertEqual(getattr(transcript.approval("r1"), "status"), "cancelled")
         self.assertEqual(getattr(transcript.entries[-1], "status"), "stopped")
+
+
+class AttachmentFileTests(unittest.TestCase):
+    """Files from the computer, as agent/attachments.py turns them into content."""
+
+    def setUp(self) -> None:
+        package: ModuleType = ModuleType("_files")
+        setattr(package, "__path__", [])
+        transcript: ModuleType = module("_files.transcript", "app/drawing_app/agent/transcript.py")
+        with patch.dict(sys.modules, {"_files": package, "_files.transcript": transcript}):
+            self.attachments: ModuleType = module("_files.attachments", "app/drawing_app/agent/attachments.py")
+        self.folder: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory()
+        self.root: Path = Path(self.folder.name)
+
+    def tearDown(self) -> None:
+        self.folder.cleanup()
+
+    def attach(self, name: str, data: bytes) -> Attachment:
+        path: Path = self.root / name
+        path.write_bytes(data)
+        return cast("Attachment", self.attachments.from_file(path))
+
+    def test_each_kind_of_file(self) -> None:
+        picture: Attachment = self.attach("photo.JPG", b"\xff\xd8 jpeg")
+        self.assertEqual((picture.kind, picture.media_type, picture.name), ("image", "image/jpeg", "photo.JPG"))
+        document: Attachment = self.attach("plan.pdf", b"%PDF-1.4 fake")
+        self.assertEqual((document.kind, document.media_type), ("document", "application/pdf"))
+        self.assertEqual(document.blocks()[0]["title"], "plan.pdf")
+        notes: Attachment = self.attach("notes.md", "# Café\nwalls 2.4 m".encode())
+        self.assertEqual((notes.kind, notes.data), ("text", "# Café\nwalls 2.4 m"))
+        wide: Attachment = self.attach("wide.txt", "hello".encode("utf-16"))
+        self.assertEqual(wide.data, "hello")
+        # Binary and very long files are named by their path for Claude to open.
+        binary: Attachment = self.attach("model.blend", b"BLENDER\x00\x01\x02")
+        self.assertEqual((binary.kind, binary.data, binary.path), ("file", "", str(self.root / "model.blend")))
+        self.assertIn("binary or too large", str(binary.blocks()[0]["text"]))
+        long: Attachment = self.attach("log.txt", b"x" * (self.attachments.TEXT_LIMIT + 1))
+        self.assertEqual(long.kind, "file")
+        with self.assertRaises(self.attachments.AttachmentError):
+            self.attachments.from_file(self.root / "missing.png")
+
+    def test_names_are_escaped_and_plain_messages_stay_text(self) -> None:
+        odd: Attachment = self.attachments.text('a "b" <c>.txt', "body")
+        self.assertTrue(str(odd.blocks()[0]["text"]).startswith('<attachment name="a &quot;b&quot; &lt;c&gt;.txt">'))
+        self.assertEqual(self.attachments.content("hi", []), "hi")
+        self.assertEqual(self.attachments.content("", [odd]), odd.blocks())
+        with self.assertRaises(self.attachments.AttachmentError):
+            self.attachments.image("huge.png", b"x" * (self.attachments.IMAGE_LIMIT + 1), "image/png")
 
 
 if __name__ == "__main__":

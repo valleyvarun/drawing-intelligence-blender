@@ -11,10 +11,14 @@ from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
 Vec3: TypeAlias = tuple[float, float, float]
-Tool: TypeAlias = Literal["select", "move", "rotate", "scale", "paint", "pipe", "printer", "grease"]
-TOOLS: tuple[str, ...] = ("select", "move", "rotate", "scale", "paint", "pipe", "printer", "grease")
+Tool: TypeAlias = Literal["select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "grease"]
+TOOLS: tuple[str, ...] = ("select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "grease")
 # Tools with their own brush and colour.
-DRAWING_TOOLS: tuple[str, ...] = ("paint", "pipe", "printer", "grease")
+DRAWING_TOOLS: tuple[str, ...] = ("paint", "pipe", "printer", "extruder", "grease")
+# Tools that drop material from a nozzle above the canvas point, so it lands where it falls.
+NOZZLE_TOOLS: tuple[str, ...] = ("printer", "extruder")
+# Tools whose strokes the app draws itself with a brush outline under the pointer.
+STROKE_TOOLS: tuple[str, ...] = ("paint", "pipe", "printer", "extruder")
 ROOT: Path = Path(__file__).resolve().parents[3]
 CONFIG: Path = (ROOT / os.environ.get("DRAWING_APP_CONFIG", "runtime/config")).resolve()
 if not CONFIG.is_relative_to(ROOT):
@@ -104,17 +108,25 @@ class Brush:
 
 
 def _brushes() -> dict[str, Brush]:
-    # The 3D Printer's radius is its nozzle's: particles fall within that circle.
-    return {"paint": Brush(), "pipe": Brush(), "printer": Brush(radius=0.03), "grease": Brush()}
+    # The 3D Printer's radius is its nozzle's: particles fall within that circle. The 3D Extruder's is its tube's.
+    return {
+        "paint": Brush(),
+        "pipe": Brush(),
+        "printer": Brush(radius=0.03),
+        "extruder": Brush(radius=0.01),
+        "grease": Brush(),
+    }
 
 
-# 3D Printer settings' ranges: particles per second and per drop, particle size and drop height in metres.
-# A particle is never wider than the nozzle, so its size is also capped at the nozzle's diameter.
+# 3D Printer settings' ranges: particles per second and per drop, particle size and drop height in metres,
+# and stickiness from 0 to 1. A particle is never wider than the nozzle, so its size is also capped at the
+# nozzle's diameter.
 PRINTER_LIMITS: dict[str, tuple[float, float]] = {
     "rate": (1.0, 2000.0),
     "per_drop": (1.0, 500.0),
     "size": (0.001, 20.0),
     "drop": (0.0, 2.0),
+    "sticky": (0.0, 1.0),
 }
 # The nozzle's radius in metres; the largest pours over a 20 m circle.
 NOZZLE_LIMITS: tuple[float, float] = (0.002, 10.0)
@@ -132,10 +144,26 @@ class Printer:
     # Each particle is a block this wide; it adds about its own height where it lands.
     size: float = 0.02
     drop: float = 0.15
+    # 0 slumps like sand; 1 stands almost upright where it lands and grips the surface below.
+    sticky: float = 0.5
 
     def particle(self, radius: float) -> float:
         """The particle size in use with a nozzle of this radius: never wider than the nozzle."""
         return min(self.size, 2.0 * radius)
+
+
+# 3D Extruder settings' ranges in metres: flow (tube length per second) and drop height.
+EXTRUDER_LIMITS: dict[str, tuple[float, float]] = {"flow": (0.01, 3.0), "drop": (0.0, 2.0)}
+# The tube's radius in metres.
+TUBE_LIMITS: tuple[float, float] = (0.001, 2.0)
+
+
+@dataclass
+class Extruder:
+    """3D Extruder: how fast the tube comes out, and the nozzle's height above the surface below."""
+
+    flow: float = 0.3
+    drop: float = 0.08
 
 
 @dataclass
@@ -184,6 +212,7 @@ class AppState:
     brushes: dict[str, Brush] = field(default_factory=_brushes)
     pencil: Pencil = field(default_factory=Pencil)
     printer: Printer = field(default_factory=Printer)
+    extruder: Extruder = field(default_factory=Extruder)
     status: str = ""
     left_width: int = 220
     right_width: int = 280
@@ -196,6 +225,8 @@ class AppState:
     agent_model: str = ""
     agent_mode: str = ""
     agent_effort: str = ""
+    # "Browse the web" in the chat's + menu: Claude may search and read web pages without asking.
+    agent_web: bool = False
     # Clayers' share of the right panel's height; the chat below gets the rest.
     layers_share: float = 1.0 / 3.0
 
@@ -269,7 +300,7 @@ def load_preferences() -> None:
             value = data.get(name)
             if isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value):
                 setattr(_STATE, name, max(limits[0], min(limits[1], float(value))))
-        for name in ("ruler", "hud"):
+        for name in ("ruler", "hud", "agent_web"):
             value = data.get(name)
             if isinstance(value, bool):
                 setattr(_STATE, name, value)
@@ -295,6 +326,7 @@ def load_preferences() -> None:
         restore_brushes(data.get("brushes"), colors=False)
         restore_pencil(data.get("pencil"))
         restore_printer(data.get("printer"))
+        restore_extruder(data.get("extruder"))
         restore_window(data.get("window_geometry"), data.get("window_maximized"))
     except (OSError, ValueError, TypeError):
         _STATE.status = "Saved preferences could not be read; using defaults."
@@ -326,6 +358,18 @@ def restore_printer(payload: object) -> None:
         if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             bounded: float = max(limits[0], min(limits[1], float(value)))
             setattr(_STATE.printer, name, round(bounded) if name == "per_drop" else bounded)
+
+
+def restore_extruder(payload: object) -> None:
+    if not isinstance(payload, dict):
+        return
+    data: dict[str, object] = cast(dict[str, object], payload)
+    name: str
+    limits: tuple[float, float]
+    for name, limits in EXTRUDER_LIMITS.items():
+        value: object = data.get(name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            setattr(_STATE.extruder, name, max(limits[0], min(limits[1], float(value))))
 
 
 def restore_pencil(payload: object) -> None:

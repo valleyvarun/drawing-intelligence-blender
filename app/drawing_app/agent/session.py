@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import IO, Literal, TypeAlias
 
+from .attachments import MAX_ATTACHMENTS, Attachment, AttachmentError, content
 from .transcript import Approval, JsonObject, Transcript, items, mapping, text
 
 Status: TypeAlias = Literal["idle", "starting", "working", "waiting", "stopping"]
@@ -148,6 +149,10 @@ class ChatSession:
         self._resume: str = ""
         # Tool names the user allowed for the rest of this chat.
         self._allowed: set[str] = set()
+        # Files and app context waiting to go with the next message.
+        self.attachments: list[Attachment] = []
+        # Claude Code restarts with new launch settings once the current turn ends.
+        self._relaunch: bool = False
 
     @property
     def running(self) -> bool:
@@ -171,23 +176,54 @@ class ChatSession:
         if not self.running:
             self._start(quiet=True)
 
+    def attach(self, attachment: Attachment) -> None:
+        """Add a file or context to the next message."""
+        if len(self.attachments) >= MAX_ATTACHMENTS:
+            raise AttachmentError(f"A message can carry {MAX_ATTACHMENTS} attachments at most")
+        self.attachments.append(attachment)
+
+    def detach(self, index: int) -> None:
+        if 0 <= index < len(self.attachments):
+            del self.attachments[index]
+
     def send(self, message: str) -> None:
-        """Send a user message, starting Claude Code first when needed."""
+        """Send a user message with any attachments, starting Claude Code first when needed."""
         value: str = message.strip()
-        if not value:
+        attached: list[Attachment] = self.attachments
+        if not value and not attached:
             return
-        self.transcript.add_user(value)
+        self.attachments = []
+        names: list[str] = []
+        attachment: Attachment
+        for attachment in attached:
+            names.append(attachment.name)
+        self.transcript.add_user(value, names)
         if not self.running and not self._start():
             return
         self._turns += 1
         self._write(
             {
                 "type": "user",
-                "message": {"role": "user", "content": value},
+                "message": {"role": "user", "content": content(value, attached)},
                 "parent_tool_use_id": None,
                 "session_id": self.session_id or "default",
             }
         )
+
+    def relaunch(self) -> None:
+        """Restart Claude Code with the current launch settings, keeping the conversation.
+
+        A running turn finishes first. Settings that Claude Code only reads at start, such as which tools
+        need no approval, change this way.
+        """
+        if not self.running:
+            return
+        if self._turns > 0:
+            self._relaunch = True
+            return
+        self._relaunch = False
+        self.close()
+        self.warm()
 
     def interrupt(self) -> None:
         """Stop the current turn; the conversation continues with the next message."""
@@ -233,6 +269,7 @@ class ChatSession:
         self.cost = 0.0
         self._resume = ""
         self._allowed.clear()
+        self.attachments = []
 
     def close(self) -> None:
         """Stop the CLI process; the conversation can be resumed by the next message."""
@@ -563,6 +600,8 @@ class ChatSession:
         if self._turns == 0:
             self._stop_requested = 0.0
             self.transcript.finish_turn()
+            if self._relaunch:
+                self.relaunch()
         if stopped:
             self.transcript.add_notice("Stopped.")
         elif event.get("is_error") is True or event.get("subtype") not in (None, "success"):

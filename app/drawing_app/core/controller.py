@@ -15,6 +15,7 @@ from .project import persist_scene
 from .shortcuts import Shortcut, is_blocked, shortcut_for
 from .state import (
     DRAWING_TOOLS,
+    EXTRUDER_LIMITS,
     NAVIGATION_MODES,
     PRINTER_LIMITS,
     TOOLS,
@@ -143,6 +144,7 @@ def set_tool(name: str) -> None:
         "paint": "Paint: drag to draw on the active canvas",
         "pipe": "Pipe: drag a 3D stroke",
         "printer": "3D Printer: hold and drag to pour; the print keeps forming as it settles",
+        "extruder": "3D Extruder: hold and drag to squeeze out a tube; hold still to coil it",
         "grease": "Grease Pencil: Blender's Draw mode on the active canvas",
     }.get(name, "")
     area: Any
@@ -416,6 +418,21 @@ def _agent_command(payload: tuple[object, ...]) -> None:
         menus.locate_claude()
     elif command == "cli" and isinstance(argument, str):
         agent.set_cli(argument)
+    elif command == "upload":
+        menus.choose_attachments()
+    elif command == "attach" and isinstance(argument, (list, tuple)):
+        paths: list[str] = []
+        item: object
+        for item in cast(list[object], argument):
+            if isinstance(item, str) and item:
+                paths.append(item)
+        agent.attach_files(paths)
+    elif command == "context" and argument in ("viewport", "selection", "scene"):
+        agent.add_context(cast(Literal["viewport", "selection", "scene"], argument))
+    elif command == "detach" and isinstance(argument, int):
+        agent.session().detach(argument)
+    elif command == "web" and isinstance(argument, bool):
+        agent.set_web(argument)
 
 
 def _window_command(command: str) -> None:
@@ -575,8 +592,20 @@ def dispatch(action: str, payload: object = None) -> None:
             if option in PRINTER_LIMITS and isinstance(level, (float, int)) and math.isfinite(level):
                 bounds: tuple[float, float] = PRINTER_LIMITS[str(option)]
                 bounded: float = max(bounds[0], min(bounds[1], float(level)))
-                # Particles per drop is a whole number.
-                setattr(state.printer, str(option), round(bounded) if option == "per_drop" else bounded)
+                if option == "per_drop":
+                    # A whole number of particles.
+                    state.printer.per_drop = round(bounded)
+                elif option == "sticky":
+                    # Whole percents, so a pour joins prints of the same stickiness.
+                    state.printer.sticky = round(bounded, 2)
+                else:
+                    setattr(state.printer, str(option), bounded)
+        elif action == "extruder" and isinstance(payload, tuple) and len(payload) == 2:
+            choice: object = payload[0]
+            measure: object = payload[1]
+            if choice in EXTRUDER_LIMITS and isinstance(measure, (float, int)) and math.isfinite(measure):
+                span: tuple[float, float] = EXTRUDER_LIMITS[str(choice)]
+                setattr(state.extruder, str(choice), max(span[0], min(span[1], float(measure))))
         elif action == "walk" and isinstance(payload, tuple) and len(payload) == 2:
             setting: object = payload[0]
             amount: object = payload[1]
@@ -1050,8 +1079,12 @@ class DRAWING_OT_session(bpy.types.Operator):
                     if get_state().pencil.tool == "builtin_brush.Fill" and pipe_edit.fill(context, event, area, region):
                         redraw()
                         return {"RUNNING_MODAL"}
-                    if get_state().pencil.tool == "builtin.trim" and pipe_edit.pipe_objects(context, editable=True):
-                        bpy.ops.drawing.pipe_trim("INVOKE_DEFAULT")
+                    # Trim and Erase act on every kind of stroke, front-most first: tools/erase.py.
+                    if get_state().pencil.tool == "builtin.trim":
+                        bpy.ops.drawing.trim("INVOKE_DEFAULT")
+                        return {"RUNNING_MODAL"}
+                    if get_state().pencil.tool == "builtin_brush.Erase":
+                        bpy.ops.drawing.erase("INVOKE_DEFAULT")
                         return {"RUNNING_MODAL"}
                     if pencil.invoke_surface_draw(context, event):
                         return {"RUNNING_MODAL"}
@@ -1079,11 +1112,12 @@ class DRAWING_OT_session(bpy.types.Operator):
 
 def stop_session() -> None:
     global _ACTIVE
-    from ..tools import printer
+    from ..tools import extruder, printer
     from ..tools.pipe_fill import cancel
 
     cancel(close=True)
     printer.shutdown()
+    extruder.shutdown()
     cleanup: Callable[[], None]
     for cleanup in tuple(_SURFACE_CLEANUPS):
         cleanup()
@@ -1095,11 +1129,13 @@ def stop_session() -> None:
 
 
 def register() -> None:
-    from ..tools.pipe_edit import DRAWING_OT_pipe_trim
+    from ..tools.erase import CLASSES
     from ..viewport.walk import DRAWING_OT_walk
 
     bpy.utils.register_class(DRAWING_OT_walk)
-    bpy.utils.register_class(DRAWING_OT_pipe_trim)
+    cls: type
+    for cls in CLASSES:
+        bpy.utils.register_class(cls)
     DRAWING_OT_surface_capture.__annotations__["stroke_count"] = bpy.props.IntProperty(options={"HIDDEN"}, min=0)
     bpy.utils.register_class(DRAWING_OT_surface_capture)
     bpy.utils.register_class(DRAWING_OT_select)
@@ -1107,12 +1143,14 @@ def register() -> None:
 
 
 def unregister() -> None:
-    from ..tools.pipe_edit import DRAWING_OT_pipe_trim
+    from ..tools.erase import CLASSES
     from ..viewport.walk import DRAWING_OT_walk
 
     stop_session()
     bpy.utils.unregister_class(DRAWING_OT_session)
     bpy.utils.unregister_class(DRAWING_OT_select)
     bpy.utils.unregister_class(DRAWING_OT_surface_capture)
-    bpy.utils.unregister_class(DRAWING_OT_pipe_trim)
+    cls: type
+    for cls in reversed(CLASSES):
+        bpy.utils.unregister_class(cls)
     bpy.utils.unregister_class(DRAWING_OT_walk)

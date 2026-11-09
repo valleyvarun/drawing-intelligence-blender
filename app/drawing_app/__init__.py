@@ -172,11 +172,12 @@ def _load_post(_unused: Any) -> None:
 @bpy.app.handlers.persistent
 def _save_pre(_unused: Any) -> None:
     from .core.project import persist_scene, saving_startup_file
-    from .tools import printer
+    from .tools import extruder, printer
     from .ui import layout
 
-    # A 3D print still forming is written as it is now.
+    # A 3D print still forming, or a tube still being laid, is written as it is now.
     printer.flush()
+    extruder.flush()
     layout.capture_widths(bpy.context)
     # The startup file opens every new session, so it must not carry one drawing's tool state.
     if not saving_startup_file():
@@ -227,14 +228,15 @@ def _identity_tick() -> float | None:
 def _history_post(_scene: Any) -> None:
     from .core.controller import redraw
     from .core.project import restore_scene
-    from .tools import printer
+    from .tools import extruder, printer
     from .tools.layers import ensure_scene
     from .tools.pipe_fill import cancel
     from .ui import overlay
 
     cancel()
-    # Undo restored the prints' meshes and fields; a print still forming is dropped.
+    # Undo restored the prints' meshes and fields; a print still forming, or a tube being laid, is dropped.
     printer.reset()
+    extruder.reset()
     restore_scene()
     ensure_scene()
     overlay.invalidate_images()

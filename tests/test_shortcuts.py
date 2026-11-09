@@ -11,7 +11,7 @@ from pathlib import Path
 from types import ModuleType
 
 ROOT: Path = Path(__file__).resolve().parents[1]
-TOOLS: tuple[str, ...] = ("select", "move", "rotate", "scale", "paint", "pipe", "printer", "grease")
+TOOLS: tuple[str, ...] = ("select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "grease")
 
 
 def load() -> ModuleType:

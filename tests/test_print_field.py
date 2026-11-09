@@ -29,11 +29,24 @@ class HeightFieldTests(unittest.TestCase):
         self.module: ModuleType = load()
         self.np: Any = self.module.np
 
-    def field(self, side: int = 32) -> Any:
+    def field(self, side: int = 32, sticky: float = 0.0) -> Any:
         """A field over flat ground at height 0, columns 1 cm wide, centred on the origin."""
-        field: Any = self.module.HeightField.empty((0.0, 0.0), 0.01, side)
+        field: Any = self.module.HeightField.empty((0.0, 0.0), 0.01, side, sticky)
         field.base[:, :] = 0.0
         return field
+
+    def settle(self, field: Any) -> None:
+        _step: int
+        for _step in range(3000):
+            if field.relax(4) < field.cell * 1e-6:
+                return
+
+    def steepest(self, field: Any) -> float:
+        surface: Any = field.base + field.height
+        return max(
+            float(self.np.abs(self.np.diff(surface, axis=0)).max()),
+            float(self.np.abs(self.np.diff(surface, axis=1)).max()),
+        )
 
     def test_a_particle_adds_its_own_height_under_its_footprint(self) -> None:
         field: Any = self.field()
@@ -81,6 +94,59 @@ class HeightFieldTests(unittest.TestCase):
         self.assertLessEqual(steepest, self.module.REPOSE * field.cell * 1.05)
         self.assertLess(float(field.height.max()), 0.05)
         self.assertGreaterEqual(int(field.solid().sum()), 25)
+
+    def test_sticky_material_stands_steeper_and_spreads_less(self) -> None:
+        self.assertAlmostEqual(self.module.repose(0.0), self.module.REPOSE)
+        self.assertAlmostEqual(self.module.repose(1.0), 5.671, places=3)
+        self.assertGreater(self.module.repose(0.5), self.module.REPOSE)
+        shapes: list[tuple[float, int]] = []
+        sticky: float
+        for sticky in (0.0, 0.5, 1.0):
+            field: Any = self.field(64, sticky)
+            field.height[32, 32] = 2.0
+            volume: float = field.volume()
+            self.settle(field)
+            self.assertAlmostEqual(field.volume(), volume, places=12)
+            self.assertLessEqual(self.steepest(field), self.module.repose(sticky) * field.cell * 1.05)
+            shapes.append((float(field.height.max()), int(field.solid().sum())))
+        # Each stickier pile is taller and covers fewer columns.
+        self.assertGreater(shapes[1][0], shapes[0][0] * 1.4)
+        self.assertGreater(shapes[2][0], shapes[1][0] * 1.4)
+        self.assertLess(shapes[1][1], shapes[0][1])
+        self.assertLess(shapes[2][1], shapes[1][1])
+
+    def test_sticky_material_grips_a_ledge_that_sand_slides_off(self) -> None:
+        kept: list[float] = []
+        sticky: float
+        for sticky in (0.0, 1.0):
+            field: Any = self.field(32, sticky)
+            # A box 10 cm tall under columns 0-15 along x; its edge is between columns 15 and 16.
+            field.base[:16, :] = 0.1
+            field.height[15, 16] = 0.05
+            self.settle(field)
+            kept.append(float(field.height[:16, :].sum()) * field.cell**2)
+        total: float = 0.05 * 0.01**2
+        # Sand keeps only a low mound back from the edge; the rest slides off.
+        self.assertLess(kept[0], total * 0.25)
+        # At full stickiness two columns' thickness grips the box at its very edge.
+        self.assertAlmostEqual(kept[1], 0.02 * 0.01**2, places=9)
+
+    def test_erasing_digs_into_the_top_under_the_eraser(self) -> None:
+        field: Any = self.field(32)
+        field.height[10:22, 10:22] = 0.1
+        volume: float = field.volume()
+        # A 3 cm ball centred on the top at the middle.
+        x: Any
+        y: Any
+        x, y = field.center(16, 16)
+        self.assertTrue(field.dig(self.np.array([[float(x), float(y), 0.1]]), self.np.array([0.03])))
+        self.assertAlmostEqual(float(field.height[16, 16]), 0.07)
+        self.assertLess(field.volume(), volume)
+        # Columns beyond the ball, and a ball that only reaches under the top, leave the material.
+        self.assertAlmostEqual(float(field.height[10, 10]), 0.1)
+        before: Any = field.height.copy()
+        self.assertFalse(field.dig(self.np.array([[float(x) + 0.05, float(y), 0.0]]), self.np.array([0.03])))
+        self.assertTrue((field.height == before).all())
 
     def test_mounds_are_round_rather_than_square_pyramids(self) -> None:
         field: Any = self.field(64)
@@ -180,6 +246,11 @@ class HeightFieldTests(unittest.TestCase):
         self.assertIsNotNone(copy)
         self.assertEqual(copy.shape, (8, 8))
         self.assertAlmostEqual(float(copy.height[3, 4]), 0.07)
+        # Stickiness is saved beside the grid; fields saved before it slump like sand.
+        self.assertEqual(copy.sticky, 0.0)
+        sticky: Any = self.module.HeightField.restore(field.grid(), field.height.ravel(), field.base.ravel(), 0.4)
+        self.assertEqual(sticky.sticky, 0.4)
+        self.assertEqual(self.field(8, 3.0).sticky, 1.0)
         self.assertIsNone(self.module.HeightField.restore([0, 0, 0, 8, 8], field.height.ravel(), field.base.ravel()))
 
 

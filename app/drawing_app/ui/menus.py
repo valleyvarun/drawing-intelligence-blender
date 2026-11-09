@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -58,6 +59,11 @@ def rename(kind: str, key: str, name: str) -> None:
 
 def locate_claude() -> None:
     bpy.ops.drawing.locate_claude("INVOKE_DEFAULT")
+
+
+def choose_attachments() -> None:
+    """Open the file browser to attach files to the next chat message."""
+    bpy.ops.drawing.attach_files("INVOKE_DEFAULT")
 
 
 class DRAWING_MT_file(bpy.types.Menu):
@@ -157,6 +163,29 @@ class DRAWING_OT_locate_claude(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class DRAWING_OT_attach_files(bpy.types.Operator):
+    """Choose files to send with the next chat message."""
+
+    bl_idname: str = "drawing.attach_files"
+    bl_label: str = "Attach"
+    directory: str
+    files: Any
+
+    def invoke(self, context: Any, event: Any) -> set[str]:
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context: Any) -> set[str]:
+        paths: list[str] = []
+        entry: Any
+        for entry in self.files:
+            if entry.name:
+                paths.append(os.path.join(self.directory, entry.name))
+        if _DISPATCH is not None and paths:
+            _DISPATCH("agent", ("attach", paths))
+        return {"FINISHED"}
+
+
 class DRAWING_HT_topbar(bpy.types.Header):
     bl_space_type: str = "TOPBAR"
 
@@ -181,6 +210,7 @@ _CLASSES: tuple[type, ...] = (
     DRAWING_OT_ui_action,
     DRAWING_OT_rename_item,
     DRAWING_OT_locate_claude,
+    DRAWING_OT_attach_files,
     DRAWING_MT_file,
     DRAWING_MT_edit,
     DRAWING_MT_view,
@@ -225,6 +255,13 @@ def install(dispatch: Callable[[str, object], None]) -> None:
     DRAWING_OT_locate_claude.__annotations__["filepath"] = bpy.props.StringProperty(subtype="FILE_PATH")
     DRAWING_OT_locate_claude.__annotations__["filter_glob"] = bpy.props.StringProperty(
         default="*.exe;claude*", options={"HIDDEN"}
+    )
+    # Several files can be chosen at once; every file type is offered.
+    DRAWING_OT_attach_files.__annotations__["directory"] = bpy.props.StringProperty(
+        subtype="DIR_PATH", options={"HIDDEN", "SKIP_SAVE"}
+    )
+    DRAWING_OT_attach_files.__annotations__["files"] = bpy.props.CollectionProperty(
+        type=bpy.types.OperatorFileListElement, options={"HIDDEN", "SKIP_SAVE"}
     )
     cls: type
     for cls in _CLASSES:

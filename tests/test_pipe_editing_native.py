@@ -15,7 +15,7 @@ from drawing_app.core import controller
 from drawing_app.core import state as state_module
 from drawing_app.core.blender import Matrix, Vector, bpy, view3d_utils
 from drawing_app.core.state import Brush, Tool, Vec3, get_state
-from drawing_app.tools import canvas, layers, pencil, pipe_edit, pipe_fill
+from drawing_app.tools import canvas, erase, layers, pencil, pipe_edit, pipe_fill
 from drawing_app.tools import drawing as drawing_module
 from drawing_app.tools.drawing import DrawingController, write_mesh
 from drawing_app.tools.geometry import Sample
@@ -26,7 +26,7 @@ def run() -> dict[str, object]:
     registered: list[Any] = []
     cls: Any
     try:
-        for cls in (pipe_edit.DRAWING_OT_pipe_trim, controller.DRAWING_OT_select, controller.DRAWING_OT_session):
+        for cls in (*erase.CLASSES, controller.DRAWING_OT_select, controller.DRAWING_OT_session):
             if not cls.is_registered:
                 bpy.utils.register_class(cls)
                 registered.append(cls)
@@ -138,6 +138,7 @@ def run() -> dict[str, object]:
                 ctrl=False,
                 alt=False,
                 shift=False,
+                oskey=False,
             )
             get_state().tool, get_state().pencil.tool = "grease", "builtin_brush.Fill"
             get_state().pencil.fill_opacity = 0.35
@@ -197,7 +198,7 @@ def run() -> dict[str, object]:
             target: Any = pipe("Trim target", [(-3, 0, 8), (0, 0, 8), (3, 0, 8)])
             first: Any = pipe("Left junction", [(-1, -1, 8), (-1, 1, 8)])
             second: Any = pipe("Right junction", [(1, -1, 8), (1, 1, 8)])
-            assert pipe_edit.trim(bpy.context, target, (0.0, 0.0, 8.0))
+            assert erase.trim_at(bpy.context, area, region, target, [(0.0, 0.0, 8.0)])
             remaining: list[Any] = [
                 obj
                 for obj in scene.objects
@@ -213,26 +214,30 @@ def run() -> dict[str, object]:
             report["trim_rebuilds_two_capped_pipe_parts_at_real_junctions"] = True
             detached: Any = pipe("Detached target", [(-3, 4, 8), (3, 4, 8)])
             overpass: Any = pipe("Depth separated crossing", [(0, 3, 9), (0, 5, 9)])
-            before: tuple[float, ...] = tuple(detached["drawing_samples"])
-            assert not pipe_edit.trim(bpy.context, detached, (0.0, 4.0, 8.0))
-            assert tuple(detached["drawing_samples"]) == before
+            assert not pipe_edit.network([detached, overpass]).junctions
+            # Meeting no other stroke, the whole pipe is trimmed, as Grease Pencil's Trim does; the pipe above stays.
+            assert erase.trim_at(bpy.context, area, region, detached, [(0.0, 4.0, 8.0)])
+            assert "Detached target" not in bpy.data.objects
             assert overpass.name in bpy.data.objects
             report["projected_crossing_at_different_depth_does_not_trim"] = True
             scaled: Any = pipe("Scaled target", [(-1, 0, 0), (1, 0, 0)])
             scaled.matrix_world = Matrix.Translation((0, 6, 8)) @ Matrix.Diagonal((3.0, 0.1, 0.1, 1.0))
-            pipe("Scaled overpass", [(0, 5, 8.06), (0, 7, 8.06)])
+            scaled_overpass: Any = pipe("Scaled overpass", [(0, 5, 8.06), (0, 7, 8.06)])
             bpy.context.view_layer.update()
-            assert not pipe_edit.trim(bpy.context, scaled, (0, 6, 8))
+            assert not pipe_edit.network([scaled, scaled_overpass]).junctions
             report["nonuniform_scale_uses_actual_mesh_contact"] = True
             square: Any = pipe("Square target", [(-2, 14, 8), (2, 14, 8)], "square")
             cutter: Any = pipe("Square overpass", [(0, 13, 8.09), (0, 15, 8.09)], "square")
-            assert not pipe_edit.trim(bpy.context, square, (1, 14, 8))
+            assert not pipe_edit.network([square, cutter]).junctions
             cutter.location.z = -0.02
             bpy.context.view_layer.update()
-            assert pipe_edit.trim(bpy.context, square, (1, 14, 8))
+            assert len(pipe_edit.network([square, cutter]).junctions) == 1
+            assert erase.trim_at(bpy.context, area, region, square, [(1, 14, 8)])
             assert abs(pipe_edit.samples(square)[0].radius - 0.04 * 2**0.5) < 1e-6
+            assert max(sample.position[0] for sample in pipe_edit.samples(square)) <= 1e-5
             report["square_profile_requires_actual_surface_contact_and_keeps_width"] = True
             invoke_trim: MagicMock = MagicMock()
+            invoke_erase: MagicMock = MagicMock()
             get_state().pencil.tool = "builtin.trim"
             with (
                 patch.object(overlay, "is_capturing", return_value=False),
@@ -240,12 +245,17 @@ def run() -> dict[str, object]:
                 patch.object(
                     controller,
                     "bpy",
-                    SimpleNamespace(ops=SimpleNamespace(drawing=SimpleNamespace(pipe_trim=invoke_trim))),
+                    SimpleNamespace(ops=SimpleNamespace(drawing=SimpleNamespace(trim=invoke_trim, erase=invoke_erase))),
                 ),
             ):
                 assert controller.DRAWING_OT_session.modal(session, bpy.context, click) == {"RUNNING_MODAL"}
                 invoke_trim.assert_called_once_with("INVOKE_DEFAULT")
+                get_state().pencil.tool = "builtin_brush.Erase"
+                assert controller.DRAWING_OT_session.modal(session, bpy.context, click) == {"RUNNING_MODAL"}
+                invoke_erase.assert_called_once_with("INVOKE_DEFAULT")
+                get_state().pencil.tool = "builtin.trim"
             report["trim_tool_input_starts_pipe_gesture"] = True
+            report["erase_tool_input_starts_eraser"] = True
             gesture_target: Any = pipe("Gesture target", [(-3, 10, 8), (3, 10, 8)])
             pipe("Gesture left junction", [(-1, 9, 8), (-1, 11, 8)])
             pipe("Gesture right junction", [(1, 9, 8), (1, 11, 8)])
@@ -253,10 +263,10 @@ def run() -> dict[str, object]:
             gesture: Any = SimpleNamespace()
 
             def draw() -> None:
-                pipe_edit.DRAWING_OT_pipe_trim.draw_gesture(gesture)
+                erase.DRAWING_OT_trim.draw_gesture(gesture)
 
             def cancel(context: Any) -> None:
-                pipe_edit.DRAWING_OT_pipe_trim.cancel(gesture, context)
+                erase.DRAWING_OT_trim.cancel(gesture, context)
 
             def add_handler(operator: object) -> None:
                 assert operator is gesture
@@ -266,10 +276,14 @@ def run() -> dict[str, object]:
                 area=area, region=region, window_manager=SimpleNamespace(modal_handler_add=add_handler)
             )
             event: SimpleNamespace = SimpleNamespace(type="LEFTMOUSE", value="PRESS", mouse_x=100, mouse_y=100)
-            assert pipe_edit.DRAWING_OT_pipe_trim.invoke(gesture, fake_context, event) == {"RUNNING_MODAL"}
+            assert erase.DRAWING_OT_trim.invoke(gesture, fake_context, event) == {"RUNNING_MODAL"}
             event.value = "RELEASE"
-            with patch.object(canvas, "ray", return_value=(Vector((0, 10, 12)), Vector((0, 0, -1)))):
-                assert pipe_edit.DRAWING_OT_pipe_trim.modal(gesture, bpy.context, event) == {"FINISHED"}
+            # The gesture's rays look straight down onto the pipe's middle.
+            with (
+                patch.object(erase.View, "ray", return_value=(Vector((0, 10, 12)), Vector((0, 0, -1)))),
+                patch.object(erase.Eraser, "_meshes_near", return_value=True),
+            ):
+                assert erase.DRAWING_OT_trim.modal(gesture, bpy.context, event) == {"FINISHED"}
             assert len(pipe_edit.samples(gesture_target)) == 2
             assert pipe_edit.samples(gesture_target)[-1].position[0] <= -1.0 + 1e-5
             report["trim_gesture_hits_actual_pipe_and_removes_interval"] = True
@@ -403,6 +417,7 @@ def run() -> dict[str, object]:
                     ctrl=False,
                     shift=False,
                     alt=False,
+                    oskey=False,
                     is_tablet=False,
                 )
 

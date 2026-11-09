@@ -38,7 +38,8 @@ class Shortcut:
     ctrl: bool = False
     shift: bool = False
     alt: bool = False
-    # App tools ("select", "move", "rotate", "scale", "paint", "pipe", "printer", "grease") it is limited to or skips.
+    # App tools ("select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "grease") it is
+    # limited to or skips.
     only: tuple[str, ...] = ()
     skip: tuple[str, ...] = ()
     # Whether holding the key down repeats the command; otherwise repeats are swallowed.
@@ -67,7 +68,7 @@ SHORTCUTS: tuple[Shortcut, ...] = (
         "plane",
         "clicked",
         "Make the double-clicked drawing plane the active one",
-        skip=("paint", "pipe", "printer", "grease"),
+        skip=("paint", "pipe", "printer", "extruder", "grease"),
         viewport=True,
         value="DOUBLE_CLICK",
     ),
@@ -80,8 +81,8 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("Z", "edit", "undo", "Undo", ctrl=True),
     Shortcut("Z", "edit", "redo", "Redo", ctrl=True, shift=True),
     Shortcut("D", "edit", "duplicate", "Duplicate the selection", ctrl=True),
-    Shortcut("DEL", "edit", "delete", "Delete the selection", skip=("paint", "pipe", "printer", "grease")),
-    Shortcut("X", "edit", "delete", "Delete the selection", skip=("paint", "pipe", "printer", "grease")),
+    Shortcut("DEL", "edit", "delete", "Delete the selection", skip=("paint", "pipe", "printer", "extruder", "grease")),
+    Shortcut("X", "edit", "delete", "Delete the selection", skip=("paint", "pipe", "printer", "extruder", "grease")),
     # Navigation. N replaces Blender's sidebar key, which the app blocks.
     Shortcut("N", "navigation", "next", "Switch right-drag navigation: Orbit, Fly, Walk", repeat=False),
     # View. In Grease Pencil Draw, F is Blender's brush-radius key instead.
@@ -99,12 +100,17 @@ SHORTCUTS: tuple[Shortcut, ...] = (
 
 # Commands a shortcut can run: (action, payload, what it does). Others are in controller.dispatch.
 COMMANDS: tuple[tuple[str, str, str], ...] = (
-    ("tool", '"select", "move", "rotate", "scale", "paint", "pipe", "printer", "grease"', "Choose an app tool"),
+    (
+        "tool",
+        '"select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "grease"',
+        "Choose an app tool",
+    ),
     (
         "printer",
-        '("rate", particles/s) / ("per_drop", 1-500) / ("size", metres) / ("drop", metres)',
-        "3D Printer flow / particles per drop / particle size / drop height",
+        '("rate", particles/s) / ("per_drop", 1-500) / ("size", metres) / ("drop", metres) / ("sticky", 0-1)',
+        "3D Printer flow / particles per drop / particle size / drop height / stickiness",
     ),
+    ("extruder", '("flow", metres/s) / ("drop", metres)', "3D Extruder flow / drop height"),
     ("pencil", '("tool", "builtin.brush")', "Grease Pencil tool: builtin.brush (Draw), builtin_brush.Fill, ..."),
     ("pencil", '("tool", "builtin.box") / ("tool", "builtin.circle")', "Shape tool: Rectangle / Ellipse"),
     ("pencil", '("brush", "Ink Pen")', "Grease Pencil brush, by its Essentials name"),

@@ -8,6 +8,7 @@ and replaced by the final block text, matched by message id and order.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
@@ -39,6 +40,8 @@ class Entry:
 @dataclass
 class UserMessage(Entry):
     text: str
+    # Names of the files and context sent with the message.
+    attachments: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -109,8 +112,8 @@ class Transcript:
         self._next_id += 1
         return value
 
-    def add_user(self, message: str) -> UserMessage:
-        entry: UserMessage = UserMessage(self._id(), message)
+    def add_user(self, message: str, attachments: Sequence[str] = ()) -> UserMessage:
+        entry: UserMessage = UserMessage(self._id(), message, list(attachments))
         self.entries.append(entry)
         return entry
 

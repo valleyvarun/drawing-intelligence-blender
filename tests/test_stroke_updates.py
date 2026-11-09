@@ -82,6 +82,8 @@ class StrokeUpdateTests(unittest.TestCase):
         state: ModuleType = modules["_stroke_test.core.state"]
         setattr(state, "Vec3", tuple[float, float, float])
         setattr(state, "get_state", MagicMock(return_value=SimpleNamespace(fps_limit=60)))
+        setattr(state, "NOZZLE_TOOLS", ("printer", "extruder"))
+        setattr(state, "STROKE_TOOLS", ("paint", "pipe", "printer", "extruder"))
         for name in ("AppState", "Brush"):
             setattr(state, name, MagicMock())
         blender: ModuleType = modules["_stroke_test.core.blender"]

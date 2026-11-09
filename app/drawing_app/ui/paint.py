@@ -37,6 +37,7 @@ _BLENDER_ICONS: dict[str, str] = {
     # Built by scripts/build_app_icons.py in the box icon's colour and line width.
     "shape": "app.shape.dat",
     "printer": "app.printer.dat",
+    "extruder": "app.extruder.dat",
     "builtin.eyedropper": "ops.paint.eyedropper_add.dat",
 }
 _IMAGES: dict[str, Any] = {}

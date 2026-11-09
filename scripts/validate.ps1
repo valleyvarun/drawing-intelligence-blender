@@ -51,7 +51,7 @@ try {
         & $Node --max-old-space-size=1024 $pyright --project $config
         if ($LASTEXITCODE -ne 0) { throw "Python type checks failed: $config" }
     }
-    foreach ($test in @('test_desktop_lifecycle.py', 'test_touch_lifecycle.py', 'test_layout_lifecycle.py', 'test_fly_guides.py', 'test_icon_rendering.py', 'test_zoom_navigation.py', 'test_stroke_updates.py', 'test_pencil_toolbar.py', 'test_axis_spokes.py', 'test_pipe_editing.py', 'test_curve_fill.py', 'test_fill_process.py', 'test_fill_viewport.py', 'test_api_registry.py', 'test_agent_chat.py', 'test_agent_mcp.py', 'test_shortcuts.py', 'test_print_field.py')) {
+    foreach ($test in @('test_desktop_lifecycle.py', 'test_touch_lifecycle.py', 'test_layout_lifecycle.py', 'test_fly_guides.py', 'test_icon_rendering.py', 'test_zoom_navigation.py', 'test_stroke_updates.py', 'test_pencil_toolbar.py', 'test_axis_spokes.py', 'test_pipe_editing.py', 'test_curve_fill.py', 'test_fill_process.py', 'test_fill_viewport.py', 'test_api_registry.py', 'test_agent_chat.py', 'test_agent_mcp.py', 'test_shortcuts.py', 'test_print_field.py', 'test_extrusion.py', 'test_erase_geometry.py')) {
         & $Python (Join-Path $appRoot "tests/$test")
         if ($LASTEXITCODE -ne 0) { throw "Lightweight regression failed: $test" }
     }

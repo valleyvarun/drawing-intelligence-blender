@@ -46,8 +46,9 @@ class PencilToolbarTests(unittest.TestCase):
         setattr(blender, "view3d_utils", MagicMock())
         tools: ModuleType = ModuleType("_toolbar.tools")
         setattr(tools, "layers", MagicMock())
-        # The 3D Printer's own tests cover it; stopping a session only shuts it down.
+        # The 3D Printer's and 3D Extruder's own tests cover them; stopping a session only shuts them down.
         setattr(tools, "printer", MagicMock())
+        setattr(tools, "extruder", MagicMock())
         self.tools_module: ModuleType = tools
         viewport: ModuleType = ModuleType("_toolbar.viewport")
         self.viewport_module: ModuleType = viewport
@@ -1172,7 +1173,7 @@ class PencilToolbarTests(unittest.TestCase):
         widgets: dict[str, Widget] = self.toolbox_widgets("select", 220)
         self.assertIn("toolbox_hex", widgets)
         tool: Tool
-        for tool in ("paint", "pipe", "printer"):
+        for tool in ("paint", "pipe", "printer", "extruder"):
             widgets = self.toolbox_widgets(tool, 220)
             self.assertNotIn("toolbox_hex", widgets, tool)
             self.assertIn(f"tool_{tool}_hex", widgets, tool)
@@ -1200,6 +1201,10 @@ class PencilToolbarTests(unittest.TestCase):
         self.assertEqual(per_drop.value, 1.0)
         drop: Widget = widgets["slider_drop"]
         self.assertEqual((drop.action, drop.prefix, drop.maximum), ("printer", ("drop",), 2.0))
+        # Sticky shows a percentage and sends a share: 0 slumps like sand, 1 stands almost upright.
+        sticky: Widget = widgets["slider_sticky"]
+        self.assertEqual((sticky.action, sticky.prefix, sticky.tooltip), ("printer", ("sticky",), "Sticky"))
+        self.assertEqual((sticky.minimum, sticky.maximum, sticky.scale, sticky.value), (0, 100, 0.01, 50.0))
         # A brush shape and pressure toggles do not apply to pouring.
         self.assertNotIn("brush_shape", widgets)
         self.assertNotIn("pressure_radius", widgets)
@@ -1220,9 +1225,53 @@ class PencilToolbarTests(unittest.TestCase):
             controller.dispatch("printer", ("size", 50.0))
         self.assertEqual(self.state.printer.per_drop, 1)
         self.assertEqual(self.state.printer.size, 20.0)
+        # Stickiness keeps whole percents, from 0 to 1.
+        with patch.dict(sys.modules, self.imports):
+            controller.dispatch("printer", ("sticky", 0.4567))
+        self.assertEqual(self.state.printer.sticky, 0.46)
+        with patch.dict(sys.modules, self.imports):
+            controller.dispatch("printer", ("sticky", 1.7))
+        self.assertEqual(self.state.printer.sticky, 1.0)
+        with patch.dict(sys.modules, self.imports):
+            controller.dispatch("printer", ("sticky", -0.2))
+        self.assertEqual(self.state.printer.sticky, 0.0)
         # In use, a particle is never wider than the nozzle.
         self.assertEqual(self.state.printer.particle(0.03), 0.06)
         self.assertFalse(hasattr(self.state.printer, "flow"))
+
+    def test_extruder_settings_send_tube_size_flow_and_drop(self) -> None:
+        widgets: dict[str, Widget] = self.toolbox_widgets("select", 220)
+        self.assertEqual((widgets["tool_extruder"].action, widgets["tool_extruder"].payload), ("tool", "extruder"))
+        widgets = self.toolbox_widgets("extruder", 220)
+        tube: Widget = widgets["slider_radius"]
+        self.assertEqual((tube.action, tube.prefix, tube.log), ("brush", ("radius",), True))
+        self.assertEqual((tube.minimum, tube.maximum, tube.value), (0.001, 2.0, 0.01))
+        flow: Widget = widgets["slider_flow"]
+        self.assertEqual((flow.action, flow.prefix, flow.log), ("extruder", ("flow",), True))
+        self.assertEqual((flow.minimum, flow.maximum, flow.value), (0.01, 3.0, 0.3))
+        drop: Widget = widgets["slider_drop"]
+        self.assertEqual((drop.action, drop.prefix, drop.maximum, drop.value), ("extruder", ("drop",), 2.0, 0.08))
+        # Particle settings, a brush shape, and pressure toggles belong to other tools.
+        self.assertNotIn("slider_rate", widgets)
+        self.assertNotIn("brush_shape", widgets)
+        self.assertNotIn("pressure_radius", widgets)
+
+    def test_extruder_settings_are_bounded(self) -> None:
+        controller: ModuleType = self.load_controller()
+        with patch.dict(sys.modules, self.imports):
+            controller.dispatch("extruder", ("flow", 50.0))
+            controller.dispatch("extruder", ("drop", -1.0))
+            controller.dispatch("extruder", ("drop", float("nan")))
+            controller.dispatch("extruder", ("rate", 5.0))
+        self.assertEqual((self.state.extruder.flow, self.state.extruder.drop), (3.0, 0.0))
+        self.assertFalse(hasattr(self.state.extruder, "rate"))
+        state: ModuleType = self.state_module
+        with (
+            patch.object(state.Path, "is_file", return_value=True),
+            patch.object(state.Path, "read_text", return_value=json.dumps({"extruder": {"flow": 0.001, "drop": 0.5}})),
+        ):
+            state.load_preferences()
+        self.assertEqual((self.state.extruder.flow, self.state.extruder.drop), (0.01, 0.5))
 
     def test_log_sliders_space_values_by_ratio(self) -> None:
         self.toolbox_widgets("printer", 220)
@@ -1230,8 +1279,10 @@ class PencilToolbarTests(unittest.TestCase):
         nozzle: Widget = overlay.Widget("slider_radius", (0.0, 0.0, 100.0, 24.0), minimum=0.002, maximum=10.0, log=True)
         self.assertAlmostEqual(overlay.slider_value(nozzle, 0.0), 0.002)
         self.assertAlmostEqual(overlay.slider_value(nozzle, 1.0), 10.0)
-        # The middle of the track is the geometric middle: 1.4 m between 2 mm and 10 m.
-        self.assertAlmostEqual(overlay.slider_value(nozzle, 0.5), math.sqrt(0.002 * 10.0))
+        # The middle of the track is the geometric middle, to three significant figures: 0.141 m between
+        # 2 mm and 10 m.
+        self.assertAlmostEqual(overlay.slider_value(nozzle, 0.5), 0.141)
+        self.assertAlmostEqual(overlay.slider_value(nozzle, 0.5), math.sqrt(0.002 * 10.0), places=3)
         value: float
         for value in (0.002, 0.03, 0.5, 10.0):
             fraction: float = overlay.slider_fraction(value, 0.002, 10.0, True)
@@ -1254,6 +1305,8 @@ class PencilToolbarTests(unittest.TestCase):
             self.assertEqual((self.state.printer.rate, self.state.printer.drop), (200.0, 0.3))
             state.load_preferences()
             self.assertEqual((self.state.printer.rate, self.state.printer.per_drop), (50.0, 7))
+            # Preferences saved before the Sticky setting start from its default.
+            self.assertEqual(self.state.printer.sticky, 0.5)
 
     def test_rgb_fields_fit_three_digits_in_a_narrow_tool_box(self) -> None:
         # 159 is a saved Tool Box width whose fields used to show "...".

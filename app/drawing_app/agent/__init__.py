@@ -13,19 +13,23 @@ running app through a discovery file in the configuration folder (Windows > Copy
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from ..core.blender import bpy
-from ..core.state import CONFIG, get_state, save_preferences
+from ..core.state import CONFIG, AppState, get_state, save_preferences
 from . import cli, runner
+from .attachments import AttachmentError
 from .bridge import DISCOVERY_FILE, Bridge
+from .context import ContextKind, attach_context, attach_file
 from .session import ChatSession, Launch, LaunchError
 from .transcript import JsonObject
 
 # MCP server name: Claude sees its tools as mcp__blender__<tool>.
 SERVER: str = "blender"
 SERVER_SCRIPT: Path = Path(__file__).with_name("mcp_server.py")
+# Claude Code's web tools, switched on and off together by "Browse the web".
+WEB_TOOLS: tuple[str, ...] = ("WebSearch", "WebFetch")
 SYSTEM_PROMPT: str = """You are running inside Drawing Intelligence, a 3D sketching app built on Blender 5.2. \
 The user chats with you from a narrow panel beside the 3D viewport, so keep replies short.
 
@@ -37,7 +41,8 @@ This is a drawing app, so build things from strokes unless asked otherwise.
 create_group, set_active_group, create_drawing_plane, set_view, and frame_objects match the app's controls.
 - execute_python runs Python in the app with bpy and the same tools as `api` (from drawing_app import api). \
 Use it when no other tool fits; the user approves each run.
-Each change you make is one undo step for the user."""
+Each change you make is one undo step for the user.
+The user can attach files and app context (a viewport screenshot, the selected objects, or a scene summary) to a message; they arrive in it as images, documents, or <attachment> text."""
 
 _SESSION: ChatSession | None = None
 _BRIDGE: Bridge | None = None
@@ -87,13 +92,16 @@ def _launch() -> Launch:
     for entry in api.tools():
         if not entry.approval:
             allowed.append(f"mcp__{SERVER}__{entry.name}")
+    # Questions are asked in plain chat; the panel has no multiple-choice form.
+    disallowed: list[str] = ["AskUserQuestion"]
+    # "Browse the web" lets Claude search and read pages without asking; off, it has no web tools.
+    (allowed if get_state().agent_web else disallowed).extend(WEB_TOOLS)
     return Launch(
         command=command,
         cwd=str(workspace()),
         mcp_config={"mcpServers": servers} if servers else {},
         allowed_tools=allowed,
-        # Questions are asked in plain chat; the panel has no multiple-choice form.
-        disallowed_tools=["AskUserQuestion"],
+        disallowed_tools=disallowed,
         system_prompt=SYSTEM_PROMPT,
         model=get_state().agent_model,
         permission_mode=get_state().agent_mode,
@@ -147,6 +155,49 @@ def set_effort(level: str) -> None:
     get_state().agent_effort = level
     save_preferences()
     session().set_effort(level)
+
+
+def set_web(enabled: bool) -> None:
+    """Let Claude browse the web without asking, or take its web tools away; the chat carries on."""
+    state: AppState = get_state()
+    if state.agent_web == enabled:
+        return
+    state.agent_web = enabled
+    save_preferences()
+    chat: ChatSession = session()
+    chat.transcript.add_notice(
+        "Browsing the web: Claude can search and read web pages without asking."
+        if enabled
+        else "Web browsing is off: Claude cannot search or read web pages."
+    )
+    # Claude Code reads which tools it may use when it starts.
+    chat.relaunch()
+
+
+def attach_files(paths: Sequence[str]) -> None:
+    """Attach files from the computer to the next message; a file that cannot be attached is reported."""
+    chat: ChatSession = session()
+    path: str
+    for path in paths:
+        error: AttachmentError | OSError | RuntimeError
+        try:
+            chat.attach(attach_file(Path(path)))
+        except AttachmentError as error:
+            chat.transcript.add_notice(str(error), error=True)
+        except (OSError, RuntimeError) as error:
+            chat.transcript.add_notice(f"{Path(path).name} could not be attached: {error}", error=True)
+
+
+def add_context(kind: ContextKind) -> None:
+    """Attach a viewport screenshot, the selected objects, or a scene summary to the next message."""
+    chat: ChatSession = session()
+    error: AttachmentError | OSError | RuntimeError
+    try:
+        chat.attach(attach_context(kind))
+    except AttachmentError as error:
+        chat.transcript.add_notice(str(error), error=True)
+    except (OSError, RuntimeError) as error:
+        chat.transcript.add_notice(f"The context could not be attached: {error}", error=True)
 
 
 def _warm() -> float | None:

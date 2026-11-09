@@ -26,7 +26,7 @@ is included in this directory.
 These are original VCO triangle assets. The application reads their
 coordinates and colors directly; no icon geometry has been redrawn.
 
-Shape: app.shape.dat and 3D Printer: app.printer.dat are not Blender
-icons. scripts/build_app_icons.py writes them in the color of
+Shape: app.shape.dat, 3D Printer: app.printer.dat, and 3D Extruder:
+app.extruder.dat are not Blender icons. scripts/build_app_icons.py writes them in the color of
 ops.gpencil.primitive_box.dat; the Shape icon also reuses its "+"
 triangles and line width for square, circle, and triangle outlines.

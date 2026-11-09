@@ -10,8 +10,10 @@ from typing import Any, cast
 
 from ..core.blender import bpy, gpu
 from ..core.state import (
+    EXTRUDER_LIMITS,
     NOZZLE_LIMITS,
     PRINTER_LIMITS,
+    TUBE_LIMITS,
     WALK_LIMITS,
     AppState,
     Brush,
@@ -269,10 +271,14 @@ def slider_fraction(value: float, minimum: float, maximum: float, log: bool) -> 
 
 
 def slider_value(widget: Widget, fraction: float) -> float:
-    """The value at a point along a slider's track, from 0 to 1."""
+    """The value at a point along a slider's track, from 0 to 1.
+
+    A log slider's value keeps three significant figures, such as 0.0123, so its field can show it.
+    """
     share: float = max(0.0, min(1.0, fraction))
     if widget.log and widget.minimum > 0.0 and widget.maximum > widget.minimum:
-        return widget.minimum * (widget.maximum / widget.minimum) ** share
+        value: float = float(f"{widget.minimum * (widget.maximum / widget.minimum) ** share:.3g}")
+        return max(widget.minimum, min(widget.maximum, value))
     return widget.minimum + share * (widget.maximum - widget.minimum)
 
 
@@ -311,7 +317,8 @@ def _slider(
         maximum=maximum,
         scale=scale,
         tooltip=label,
-        compact=compact,
+        # Log values such as 0.0123 shrink to fit rather than lose digits.
+        compact=compact or log,
     )
     left: float = x + 55
     width: float = max(30, w - (86 if pressure else 58))
@@ -610,7 +617,7 @@ def _pencil(context: Any, x: float, y: float, width: float) -> float:
 
 
 def _printer(state: AppState, x: float, y: float, width: float) -> float:
-    """3D Printer settings: nozzle and particle size, flow, particles per drop, drop height, and colour.
+    """3D Printer settings: nozzle and particle size, stickiness, flow, particles per drop, drop height, and colour.
 
     Returns the next row's y. Both sizes span millimetres to metres, so their sliders are logarithmic.
     """
@@ -645,6 +652,8 @@ def _printer(state: AppState, x: float, y: float, width: float) -> float:
         action="printer",
         log=True,
     )
+    # 0% slumps like sand; 100% stands almost upright and builds up over the surface below.
+    y = _slider("sticky", "Sticky", state.printer.sticky * 100, x, y, width, 0, 100, 0.01, "", action="printer")
     rate: tuple[float, float] = PRINTER_LIMITS["rate"]
     y = _slider(
         "rate", "Flow (particles/s)", state.printer.rate, x, y, width, rate[0], rate[1], 1.0, "", action="printer"
@@ -684,6 +693,63 @@ def _printer(state: AppState, x: float, y: float, width: float) -> float:
     return _swatches(x, y, width, SWATCHES, brush.color, "Preset color for this tool")
 
 
+def _extruder(state: AppState, x: float, y: float, width: float) -> float:
+    """3D Extruder settings: tube size, flow, drop height, and colour. Returns the next row's y.
+
+    Tube size spans millimetres to metres and flow centimetres to metres per second, so both are logarithmic.
+    """
+    brush: Brush = state.brushes["extruder"]
+    factor: float = _units()[0]
+    y = _slider(
+        "radius",
+        f"Tube size ({state.units})",
+        brush.radius * factor,
+        x,
+        y,
+        width,
+        TUBE_LIMITS[0] * factor,
+        TUBE_LIMITS[1] * factor,
+        1 / factor,
+        "",
+        log=True,
+    )
+    # Moving slower than the flow coils the spare tube; holding still piles it up.
+    flow: tuple[float, float] = EXTRUDER_LIMITS["flow"]
+    y = _slider(
+        "flow",
+        f"Flow ({state.units}/s)",
+        state.extruder.flow * factor,
+        x,
+        y,
+        width,
+        flow[0] * factor,
+        flow[1] * factor,
+        1 / factor,
+        "",
+        action="extruder",
+        log=True,
+    )
+    drop: tuple[float, float] = EXTRUDER_LIMITS["drop"]
+    y = _slider(
+        "drop",
+        f"Drop height ({state.units})",
+        state.extruder.drop * factor,
+        x,
+        y,
+        width,
+        drop[0] * factor,
+        drop[1] * factor,
+        1 / factor,
+        "",
+        action="extruder",
+    )
+    # This tool's colour only.
+    paint.text("Color", x, y)
+    y -= 31
+    y = _color_picker("tool_extruder", "tool", brush.color, x, y, width, "Color for this tool only")
+    return _swatches(x, y, width, SWATCHES, brush.color, "Preset color for this tool")
+
+
 def _toolbox(context: Any, w: float, h: float) -> None:
     global _TOOLBOX_SELECTION
     from ..tools import pencil
@@ -703,7 +769,13 @@ def _toolbox(context: Any, w: float, h: float) -> None:
         ("Transform", (("move", "Move"), ("rotate", "Rotate"), ("scale", "Scale"))),
         (
             "Drawing",
-            (("paint", "3D Paint"), ("pipe", "3D Pipe"), ("printer", "3D Printer"), *pencil.toolbox_tools()),
+            (
+                ("paint", "3D Paint"),
+                ("pipe", "3D Pipe"),
+                ("printer", "3D Printer"),
+                ("extruder", "3D Extruder"),
+                *pencil.toolbox_tools(),
+            ),
         ),
         ("Erase", pencil.ERASING_TOOLS),
     )
@@ -829,6 +901,8 @@ def _toolbox(context: Any, w: float, h: float) -> None:
         y = _pencil(context, x, y, width)
     elif state.tool == "printer":
         y = _printer(state, x, y, width)
+    elif state.tool == "extruder":
+        y = _extruder(state, x, y, width)
     elif state.tool in ("paint", "pipe"):
         brush: Brush = state.brush
         factor: float
@@ -1257,13 +1331,27 @@ def _number(widget: Widget, value: float) -> None:
 
 
 def _send_chat() -> None:
+    from .. import agent
+
     message: str = _CHAT.take_draft().strip()
-    if message:
+    # Files and context can go on their own.
+    if message or agent.session().attachments:
         _emit("agent", ("send", message))
 
 
-def _chat_command(payload: object) -> None:
-    """Chat actions handled by the panel itself: tool details, example prompts, and sending."""
+def _open_popup(area: int, bounds: Rect, entries: list[object], key: str) -> None:
+    """Open a dropdown below a button, or above it when there is no room below (as at the panel's bottom)."""
+    global _POPUP
+    items: list[MenuItem] = _popup_items(entries)
+    sliders: list[PopupSlider] = _popup_sliders(entries)
+    menu_height: float = _popup_height(len(items), len(sliders))
+    below: float = bounds[1] - 2
+    above: float = bounds[1] + bounds[3] + 2 + menu_height
+    _POPUP = Popup(area, bounds[0], below if below - menu_height >= 2 else above, items, key, sliders)
+
+
+def _chat_command(payload: object, area: int) -> None:
+    """Chat actions handled by the panel itself: tool details, example prompts, sending, and the context menu."""
     if not isinstance(payload, tuple) or not payload:
         return
     command: object = payload[0]
@@ -1274,6 +1362,9 @@ def _chat_command(payload: object) -> None:
         _CHAT.draft = argument
     elif command == "send":
         _send_chat()
+    elif command == "context_menu":
+        # The + menu's Add context opens its own menu in the same place.
+        _open_popup(area, _CHAT.add_bounds, list(_CHAT.context_menu()), "chat_context")
 
 
 def _commit() -> None:
@@ -1524,7 +1615,7 @@ def handle_event(context: Any, event: Any) -> bool:
             elif widget.kind == "chat":
                 _EDIT = Edit(widget, _CHAT.draft, len(_CHAT.draft), selected=False)
             elif widget.action == "chat":
-                _chat_command(widget.payload)
+                _chat_command(widget.payload, pointer)
             elif widget.kind == "divider":
                 _DRAG = widget
                 _DRAG_ORIGIN_Y = region.y / scale
@@ -1541,20 +1632,7 @@ def handle_event(context: Any, event: Any) -> bool:
                 _number(widget, slider_value(widget, (x - widget.bounds[0]) / widget.bounds[2]))
             elif widget.action == "popup":
                 entries: list[object] = cast(list[object], widget.payload) if isinstance(widget.payload, list) else []
-                items: list[MenuItem] = _popup_items(entries)
-                sliders: list[PopupSlider] = _popup_sliders(entries)
-                # Open below the button, or above it when there is no room below (as at the panel's bottom).
-                menu_height: float = _popup_height(len(items), len(sliders))
-                below: float = widget.bounds[1] - 2
-                above: float = widget.bounds[1] + widget.bounds[3] + 2 + menu_height
-                _POPUP = Popup(
-                    pointer,
-                    widget.bounds[0],
-                    below if below - menu_height >= 2 else above,
-                    items,
-                    widget.key,
-                    sliders,
-                )
+                _open_popup(pointer, widget.bounds, entries, widget.key)
             elif widget.action == "expand":
                 key: str = str(widget.payload)
                 _COLLAPSED.symmetric_difference_update({key})
