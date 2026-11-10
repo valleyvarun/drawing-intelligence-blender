@@ -122,9 +122,15 @@ def bridge() -> Bridge | None:
 
 def set_cli(path: str) -> None:
     """Use a chosen Claude Code executable from now on."""
+    chat: ChatSession = session()
+    if cli.command(path) is None:
+        # Keep the previous choice; the panel still offers Locate Claude Code.
+        chat.transcript.add_notice(
+            f"{path} cannot start Claude Code. Choose claude.exe from a Claude Code installation.", error=True
+        )
+        return
     get_state().agent_cli = path
     save_preferences()
-    chat: ChatSession = session()
     chat.close()
     chat.missing_cli = False
     chat.transcript.add_notice(f"Using Claude Code at {path}")

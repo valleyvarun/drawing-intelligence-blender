@@ -1,5 +1,11 @@
 # Validation
 
+## Finding Claude Code and signing in (2026-11-10)
+
+The chat now finds Claude Code in the Claude desktop app's folder (`%LOCALAPPDATA%\Claude-Data\<package>\claude-code\<version>\<build>\claude.exe`), npm's and WinGet's default folders, and the PATH Windows has saved, in addition to PATH, the native installer, and editor extensions. The newest bundled copy is used. A chosen copy that has been removed falls back to the search. Sign in and Sign out report a missing Claude Code in the chat instead of doing nothing, and Locate Claude Code refuses files that cannot start it.
+
+`test_agent_cli.py` covers each location, npm shims with JavaScript and native targets, ordering, and the fallback; `test_agent_chat.py` covers the sign-in notice and that sign-in does not pass on a parent session's `CLAUDECODE` flag. On this machine, with no files faked, the search chose the desktop app's Claude Code 2.1.321, which answered `--version` and `auth status --json` with the same sign-in as the VS Code extension (`%USERPROFILE%\.claude`). Black, Ruff, syntax, both Pyright configurations, all lightweight tests, and `test_agent_native.py` pass. Run `test_agent_native.py` with a new `-ProfileName`: its saved profile keeps the brush settings from earlier runs, and a square pipe brush left there fails its pipe-size check (1.04 instead of 1.06). The sign-in flow in the browser was not run, and the fix has not yet been tried on another laptop.
+
 ## Claude Code chat, Blender MCP, and scripting (2026-11-08)
 
 Black, Ruff, syntax compilation, and both Pyright configurations (standalone and editor context) pass with zero errors. The tools were installed in a temporary folder outside the repository because this machine's `.checks/python-tools` copy is not readable by the current user.

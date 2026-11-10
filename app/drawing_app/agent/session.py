@@ -298,19 +298,22 @@ class ChatSession:
 
     def refresh_account(self) -> None:
         """Ask Claude Code who is signed in (`claude auth status`), in the background."""
-        launch: Launch | None = self._tool()
+        launch: Launch | None = self._tool(quiet=True)
         if launch is not None:
             threading.Thread(target=self._status, args=(launch,), daemon=True, name="claude-auth").start()
 
     def sign_in(self) -> None:
         """Run Claude Code's own sign-in in a console window; it opens the browser."""
+        if self.signing_in:
+            return
         launch: Launch | None = self._tool()
-        if launch is None or self.signing_in:
+        if launch is None:
             return
         try:
             process: subprocess.Popen[bytes] = subprocess.Popen(
                 [*launch.command, "auth", "login"],
                 cwd=launch.cwd,
+                env=self._environment(launch),
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             )
         except OSError as error:
@@ -329,6 +332,7 @@ class ChatSession:
             process: subprocess.Popen[bytes] = subprocess.Popen(
                 [*launch.command, "auth", "logout"],
                 cwd=launch.cwd,
+                env=self._environment(launch),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -366,15 +370,30 @@ class ChatSession:
             changed = True
         return changed
 
-    def _tool(self) -> Launch | None:
-        """How to run Claude Code's own commands, such as sign-in; None when it cannot be found."""
+    def _tool(self, quiet: bool = False) -> Launch | None:
+        """How to run Claude Code's own commands, such as sign-in; None when it cannot be found.
+
+        Unless quiet, the transcript says why, so a sign-in click never does nothing.
+        """
         try:
             launch: Launch = self._prepare()
-        except LaunchError:
+        except LaunchError as error:
             self.missing_cli = True
+            if not quiet:
+                self.transcript.add_notice(str(error), error=True)
             return None
+        self.missing_cli = False
         os.makedirs(launch.cwd, exist_ok=True)
         return launch
+
+    @staticmethod
+    def _environment(launch: Launch) -> dict[str, str]:
+        """The environment for every Claude Code command, so sign-in and the chat use the same account."""
+        environment: dict[str, str] = dict(os.environ)
+        # A Claude Code session that launched this app must not make the CLI think it is nested.
+        environment.pop("CLAUDECODE", None)
+        environment.update(launch.env)
+        return environment
 
     def _status(self, launch: Launch) -> None:
         data: JsonObject = {}
@@ -383,6 +402,7 @@ class ChatSession:
                 [*launch.command, "auth", "status", "--json"],
                 capture_output=True,
                 cwd=launch.cwd,
+                env=self._environment(launch),
                 timeout=30.0,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
@@ -446,10 +466,7 @@ class ChatSession:
             arguments += ["--effort", launch.effort]
         if self._resume:
             arguments += ["--resume", self._resume]
-        environment: dict[str, str] = dict(os.environ)
-        # A Claude Code session that launched this app must not make the CLI think it is nested.
-        environment.pop("CLAUDECODE", None)
-        environment.update(launch.env)
+        environment: dict[str, str] = self._environment(launch)
         os.makedirs(launch.cwd, exist_ok=True)
         try:
             process: subprocess.Popen[bytes] = subprocess.Popen(

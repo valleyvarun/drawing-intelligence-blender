@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,7 @@ ROOT: Path = Path(__file__).resolve().parents[1]
 
 # A minimal Claude Code: init, streamed text, an optional permission prompt, and turn results.
 FAKE_CLI: str = textwrap.dedent("""
-    import json, sys
+    import json, os, sys
     from pathlib import Path
 
     if sys.argv[1:3] == ["auth", "status"]:
@@ -34,7 +35,8 @@ FAKE_CLI: str = textwrap.dedent("""
                           "subscriptionType": "max"}))
         raise SystemExit(0)
     if sys.argv[1:2] == ["auth"]:
-        Path("auth-%s.txt" % sys.argv[2]).write_text("done")
+        # "done" unless the app passed on a parent Claude Code session's nesting flag.
+        Path("auth-%s.txt" % sys.argv[2]).write_text(os.environ.get("CLAUDECODE", "done"))
         raise SystemExit(0)
     Path("arguments.json").write_text(json.dumps(sys.argv[1:]))
     MODELS = [
@@ -462,11 +464,15 @@ class AgentChatTests(unittest.TestCase):
         self.assertEqual(self.session_module.plan_label("Claude Pro"), "Claude Pro")
         no_window: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         # The sign-in console would flash during tests; the stand-in CLI needs no window.
-        with patch.object(subprocess, "CREATE_NEW_CONSOLE", no_window, create=True):
+        # Started from a Claude Code session, sign-in must still run as a top-level Claude Code.
+        with (
+            patch.object(subprocess, "CREATE_NEW_CONSOLE", no_window, create=True),
+            patch.dict(os.environ, {"CLAUDECODE": "1"}),
+        ):
             session.sign_in()
         self.assertTrue(session.signing_in)
         self.wait(session, lambda: not session.signing_in)
-        self.assertTrue((self.root / "auth-login.txt").exists())
+        self.assertEqual((self.root / "auth-login.txt").read_text(), "done")
         session.sign_out()
         self.wait(
             session,
@@ -479,9 +485,16 @@ class AgentChatTests(unittest.TestCase):
 
         quiet: ChatSession = self.session(missing)
         quiet.warm()
-        # A warm start never adds messages; the panel shows the locate option instead.
+        quiet.refresh_account()
+        # A warm start and an account check never add messages; the panel shows the locate option instead.
         self.assertTrue(quiet.missing_cli)
         self.assertEqual(quiet.transcript.entries, [])
+        # A sign-in click says why it cannot start, instead of doing nothing.
+        quiet.sign_in()
+        self.assertFalse(quiet.signing_in)
+        reason: object = self.entries(quiet, "Notice")[0]
+        self.assertTrue(getattr(reason, "error"))
+        self.assertEqual(getattr(reason, "text"), "Claude Code was not found.")
         session: ChatSession = self.session(missing)
         session.send("hello")
         self.assertTrue(session.missing_cli)
