@@ -11,7 +11,18 @@ from pathlib import Path
 from types import ModuleType
 
 ROOT: Path = Path(__file__).resolve().parents[1]
-TOOLS: tuple[str, ...] = ("select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "grease")
+TOOLS: tuple[str, ...] = (
+    "select",
+    "move",
+    "rotate",
+    "scale",
+    "paint",
+    "pipe",
+    "printer",
+    "extruder",
+    "sketch",
+    "grease",
+)
 
 
 def load() -> ModuleType:
@@ -46,9 +57,16 @@ class ShortcutTests(unittest.TestCase):
         self.shortcuts: ModuleType = load()
 
     def find(
-        self, key: str, *, ctrl: bool = False, shift: bool = False, tool: str = "select", over_viewport: bool = True
+        self,
+        key: str,
+        *,
+        ctrl: bool = False,
+        shift: bool = False,
+        tool: str = "select",
+        over_viewport: bool = True,
+        sketching: bool = False,
     ) -> tuple[str, object]:
-        found: object = self.shortcuts.shortcut_for(key, ctrl, shift, False, tool, over_viewport)
+        found: object = self.shortcuts.shortcut_for(key, ctrl, shift, False, tool, over_viewport, "PRESS", sketching)
         self.assertIsNotNone(found, key)
         return getattr(found, "action"), getattr(found, "payload")
 
@@ -86,6 +104,16 @@ class ShortcutTests(unittest.TestCase):
         # Keyboard rows answer presses, not a fast second tap.
         self.assertIsNone(self.shortcuts.shortcut_for("ONE", False, False, False, "select", True, "DOUBLE_CLICK"))
 
+    def test_ctrl_g_makes_a_group_beside_the_active_one_in_every_tool(self) -> None:
+        tool: str
+        for tool in TOOLS:
+            self.assertEqual(self.find("G", ctrl=True, tool=tool), ("layer", ("sibling", "")))
+            self.assertEqual(self.find("G", ctrl=True, tool=tool, over_viewport=False), ("layer", ("sibling", "")))
+        # Holding the keys makes one group, and plain G stays Blender's move.
+        self.assertFalse(getattr(self.shortcuts.shortcut_for("G", True, False, False, "select", True), "repeat"))
+        self.assertIsNone(self.shortcuts.shortcut_for("G", False, False, False, "select", True))
+        self.assertIsNone(self.shortcuts.shortcut_for("G", True, True, False, "select", True))
+
     def test_n_switches_navigation_once_per_press(self) -> None:
         self.assertEqual(self.find("N"), ("navigation", "next"))
         self.assertEqual(self.find("N", tool="grease", over_viewport=False), ("navigation", "next"))
@@ -116,10 +144,34 @@ class ShortcutTests(unittest.TestCase):
         self.assertIsNone(self.shortcuts.shortcut_for("F", False, False, False, "grease", True))
         self.assertEqual(self.find("NUMPAD_PERIOD", tool="grease"), ("frame", None))
         tool: str
-        for tool in ("paint", "pipe", "grease"):
+        for tool in ("paint", "pipe", "sketch", "grease"):
             self.assertIsNone(self.shortcuts.shortcut_for("X", False, False, False, tool, True))
             self.assertIsNone(self.shortcuts.shortcut_for("DEL", False, False, False, tool, True))
         self.assertEqual(self.find("DEL", tool="move"), ("edit", "delete"))
+
+    def test_enter_builds_the_sketch_mesh_while_a_sketch_is_open(self) -> None:
+        key: str
+        tool: str
+        for key in ("RET", "NUMPAD_ENTER"):
+            # With the brush up, or down with Select or a move tool.
+            for tool in ("sketch", "select", "move", "rotate", "scale"):
+                self.assertEqual(self.find(key, tool=tool, sketching=True), ("sketch", "confirm"))
+                self.assertEqual(self.find(key, tool=tool, over_viewport=False, sketching=True), ("sketch", "confirm"))
+            for tool in TOOLS:
+                self.assertIsNone(self.shortcuts.shortcut_for(key, False, False, False, tool, True), tool)
+            self.assertIsNone(self.shortcuts.shortcut_for(key, True, False, False, "sketch", True, "PRESS", True))
+        # B picks the brush up or puts it down, once per press, and only in a sketch.
+        for tool in ("sketch", "select", "move"):
+            self.assertEqual(self.find("B", tool=tool, sketching=True), ("sketch", ("brush", "toggle")))
+        self.assertFalse(
+            getattr(self.shortcuts.shortcut_for("B", False, False, False, "select", True, "PRESS", True), "repeat")
+        )
+        self.assertIsNone(self.shortcuts.shortcut_for("B", False, False, False, "select", True))
+        # With the brush down, Delete works on the selection again, as a plane may need removing.
+        self.assertEqual(self.find("DEL", tool="select", sketching=True), ("edit", "delete"))
+        self.assertIsNone(self.shortcuts.shortcut_for("DEL", False, False, False, "sketch", True, "PRESS", True))
+        # A click draws a sketch line, so a double-click does not activate a plane there.
+        self.assertIsNone(self.shortcuts.shortcut_for("LEFTMOUSE", False, False, False, "sketch", True, "DOUBLE_CLICK"))
 
     def test_no_two_rows_claim_the_same_keys_for_the_same_tool(self) -> None:
         claimed: dict[tuple[str, bool, bool, bool, str, str], str] = {}

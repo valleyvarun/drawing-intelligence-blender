@@ -8,12 +8,21 @@ from copy import deepcopy
 from typing import Any
 
 from ..core.blender import Vector, bpy
-from ..core.state import NOZZLE_TOOLS, STROKE_TOOLS, AppState, Brush, Vec3, get_state
+from ..core.state import NOZZLE_TOOLS, PIPE_TOOLS, STROKE_TOOLS, AppState, Brush, Vec3, get_state
 from . import canvas, layers
 from .canvas import Hit, place_cursor
 from .geometry import Face, PaintCache, PipeCache, Sample, paint_mesh, pipe_mesh, resample
 from .preview import BrushPreview
 from .surface import PaintSurface
+
+# Marks a pipe drawn with Sketch Mesh; tools/sketch_mesh.py builds the surface through these lines.
+SKETCH: str = "drawing_sketch"
+# Sketch lines finished so far; the sketch is counted again when this changes.
+_SKETCH_LINES: int = 0
+
+
+def sketch_lines_drawn() -> int:
+    return _SKETCH_LINES
 
 
 def _flat(location: Hit | None) -> Hit | None:
@@ -104,13 +113,18 @@ def write_mesh(
     mesh.update()
 
 
-def stroke_object(context: Any, kind: str, brush: Brush) -> Any:
-    """A new paint or pipe stroke in the active group, with one material per opacity level."""
-    data: Any = bpy.data.meshes.new("Paint Stroke" if kind == "paint" else "Pipe Stroke")
+def stroke_object(context: Any, kind: str, brush: Brush, sketch: bool = False) -> Any:
+    """A new paint or pipe stroke in the active group, with one material per opacity level.
+
+    A Sketch Mesh line is a pipe marked as part of the sketch waiting to become a surface.
+    """
+    data: Any = bpy.data.meshes.new("Sketch Line" if sketch else "Paint Stroke" if kind == "paint" else "Pipe Stroke")
     obj: Any = bpy.data.objects.new(data.name, data)
     layers.link_stroke(obj, context)
     obj["drawing_preview"] = True
     obj["drawing_kind"] = kind
+    if sketch:
+        obj[SKETCH] = True
     obj["drawing_shape"] = brush.shape
     obj.color = (*brush.color, brush.opacity)
     ink: Any = material(brush)
@@ -143,6 +157,8 @@ class DrawingController:
         self._samples: list[Sample] = []
         self._brush: Brush = Brush()
         self._kind: str = "paint"
+        # The app tool the stroke is drawn with; Sketch Mesh draws pipes.
+        self._tool: str = "paint"
         self._source: str = "ground"
         self._axis: int | None = None
         self._axis_origin: Vec3 = (0.0, 0.0, 0.0)
@@ -220,7 +236,13 @@ class DrawingController:
             self._pouring = _nozzle_start(self._pour_tool, context, area, region, location)
             return True
         self._brush = deepcopy(get_state().brush)
-        self._kind = get_state().tool
+        self._tool = get_state().tool
+        self._kind = "pipe" if self._tool in PIPE_TOOLS else self._tool
+        if self._tool == "sketch":
+            # Sketch lines are plain round pipes of one width.
+            self._brush.shape = "circle"
+            self._brush.hardness = self._brush.opacity = 1.0
+            self._brush.pressure_size = self._brush.pressure_hardness = self._brush.pressure_opacity = False
         self._pipe_cache = PipeCache() if self._kind == "pipe" else None
         self._uploaded_samples = 0
         self._paint_cache = (
@@ -244,7 +266,7 @@ class DrawingController:
             if self._paint_cache is not None and source is not None and not get_state().axes_spokes
             else None
         )
-        self._object = stroke_object(context, self._kind, self._brush)
+        self._object = stroke_object(context, self._kind, self._brush, sketch=self._tool == "sketch")
         self._upload()
         return True
 
@@ -344,7 +366,7 @@ class DrawingController:
             if context.scene != self._scene:
                 self.cancel()
                 return False
-            if get_state().tool != self._kind:
+            if get_state().tool != self._tool:
                 self._finish(context)
                 return False
             area, region = self._area, self._region
@@ -416,6 +438,7 @@ class DrawingController:
             self._finish(context)
 
     def _finish(self, context: Any) -> None:
+        global _SKETCH_LINES
         from ..core.project import persist_scene
 
         if get_state().axes_spokes and self._axis_tip is not None and self._samples:
@@ -426,7 +449,13 @@ class DrawingController:
         if obj is None:
             return
         store_samples(obj, self._samples)
-        get_state().status = f"{self._kind.title()} stroke · {len(self._samples)} samples"
+        if self._tool == "sketch":
+            _SKETCH_LINES += 1
+        get_state().status = (
+            "Sketch line added · Enter builds the mesh, Esc puts the brush down"
+            if self._tool == "sketch"
+            else f"{self._kind.title()} stroke · {len(self._samples)} samples"
+        )
         self._object = None
         self._samples = []
         self._paint_cache = None

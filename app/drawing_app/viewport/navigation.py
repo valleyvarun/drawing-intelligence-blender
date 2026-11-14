@@ -70,6 +70,12 @@ def gizmo_hit(rv3d: Any, position: Point) -> AxisHandle | None:
 
 
 def align_axis(rv3d: Any, axis: int, sign: int) -> None:
+    """Look along a world axis.
+
+    The 3D cursor's drawing plane turns to face the view, so strokes drawn in an X, Y, or Z view land on
+    the plane through the cursor that the view shows flat, whichever control chose the view.
+    """
+    get_state().cursor_axis = axis
     backward: Any = Vector((0.0, 0.0, 0.0))
     backward[axis] = float(sign)
     up: Any = Vector((0.0, 1.0, 0.0) if axis == 2 else (0.0, 0.0, 1.0))

@@ -131,6 +131,39 @@ class ZoomNavigationTests(unittest.TestCase):
             self.navigation.set_view(self.view, "PERSPECTIVE")
         self.assertEqual(self.view.view_perspective, "PERSP")
 
+    def test_an_axis_view_turns_the_3d_cursors_plane_to_face_it(self) -> None:
+        # Loaded with stand-in vectors, as only the cursor's plane is checked here.
+        blender: ModuleType = ModuleType("_axis_test.core.blender")
+        name: str
+        for name in ("Matrix", "Quaternion", "Vector", "bpy", "view3d_utils"):
+            setattr(blender, name, MagicMock())
+        cursor: SimpleNamespace = SimpleNamespace(cursor_axis=1)
+        state: ModuleType = ModuleType("_axis_test.core.state")
+        setattr(state, "get_state", MagicMock(return_value=cursor))
+        setattr(state, "save_preferences", MagicMock())
+        spec: ModuleSpec | None = importlib.util.spec_from_file_location(
+            "_axis_test.viewport.navigation", ROOT / "app/drawing_app/viewport/navigation.py"
+        )
+        assert spec is not None and spec.loader is not None
+        navigation: ModuleType = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {blender.__name__: blender, state.__name__: state, spec.name: navigation}):
+            spec.loader.exec_module(navigation)
+        view: MagicMock = MagicMock()
+        view.view_perspective = "PERSP"
+        # Every control that chooses an axis view goes through align_axis: the 1 2 3 keys, the menus, the
+        # Tool Box's X Y Z buttons, the orientation gizmo, and scripts.
+        axis: int
+        sign: int
+        for axis, sign in ((0, 1), (2, -1), (1, 1), (0, -1)):
+            navigation.align_axis(view, axis, sign)
+            self.assertEqual(cursor.cursor_axis, axis)
+        # The named views do too, and Perspective keeps the last plane.
+        view.view_rotation.__matmul__.return_value = [0.0, 0.0, 0.0]
+        navigation.set_view(view, "Z")
+        self.assertEqual((cursor.cursor_axis, view.view_perspective), (2, "ORTHO"))
+        navigation.set_view(view, "PERSPECTIVE")
+        self.assertEqual((cursor.cursor_axis, view.view_perspective), (2, "PERSP"))
+
 
 if __name__ == "__main__":
     unittest.main()

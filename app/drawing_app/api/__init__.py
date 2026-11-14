@@ -22,6 +22,7 @@ from .drawing import (
     set_brush,
     set_color,
     set_tool,
+    sketch_mesh,
 )
 from .registry import Image, Tool, ToolError, call, tools
 from .scene import add_primitive, delete_objects, object_info, scene_info, select_objects, transform_object
@@ -47,6 +48,7 @@ __all__: list[str] = [
     "set_color",
     "set_tool",
     "set_view",
+    "sketch_mesh",
     "tools",
     "transform_object",
     "viewport_screenshot",

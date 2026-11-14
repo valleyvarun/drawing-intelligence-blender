@@ -7,6 +7,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from drawing_app import api
+from drawing_app.core import controller
 from drawing_app.core.blender import bpy
 from drawing_app.core.project import persist_scene, restore_scene, startup_file
 from drawing_app.core.state import CONFIG, ROOT, get_state, load_preferences, restore_brushes, save_preferences
@@ -56,6 +58,38 @@ def main() -> None:
         assert get_state().brushes["pipe"].radius > 0.0
         assert get_state().brushes["pipe"].opacity == 1.0
         report["invalid_preferences_bounded"] = True
+        # Ctrl+G's command: a new group beside the active one becomes the active group.
+        controller.dispatch("layer", ("sibling", ""))
+        top: Any = bpy.data.collections[get_state().active_group]
+        assert top.name != "Default Drawing" and top.get("drawing_group"), top.name
+        assert (
+            top.name in bpy.context.scene.collection.children and get_state().status == "New active group: " + top.name
+        )
+        nested: str = layers.create_group(bpy.context, "Nested", f"collection:{top.name}")
+        assert get_state().active_group == "Nested"
+        controller.dispatch("layer", ("sibling", ""))
+        beside: Any = bpy.data.collections[get_state().active_group]
+        assert beside.name not in ("Nested", top.name) and beside.name in top.children, beside.name
+        assert beside.name not in bpy.context.scene.collection.children
+        # What is made next goes into the new active group: a stroke, a shape, and a drawing plane.
+        stroke: dict[str, object] = api.draw_stroke([[0, 0, 0], [1, 0, 0]])
+        shape: dict[str, object] = api.add_primitive("cube")
+        sheet: Any = layers.create_plane(bpy.context)
+        assert stroke["group"] == beside.name and shape["group"] == beside.name, (stroke, shape)
+        assert sheet.users_collection[0] == beside
+        assert bpy.data.objects[str(stroke["name"])].users_collection[0] == layers.stroke_collection(beside)
+        item: Any
+        for item in (bpy.data.objects[str(stroke["name"])], bpy.data.objects[str(shape["name"])], sheet):
+            bpy.data.objects.remove(item, do_unlink=True)
+        assert nested == "collection:Nested"
+        collection: Any
+        for collection in [*top.children_recursive, top]:
+            bpy.data.collections.remove(collection)
+        layers.ensure_scene(bpy.context)
+        assert get_state().active_group == "Default Drawing"
+        get_state().drawing_plane = False
+        get_state().active_plane = "Ground Plane"
+        report["ctrl_g_group_beside_the_active_one"] = True
         group: str = layers.create_group(bpy.context, "Project Group")
         layers.activate(bpy.context, group)
         plane: Any = layers.create_plane(bpy.context)

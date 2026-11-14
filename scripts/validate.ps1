@@ -51,7 +51,7 @@ try {
         & $Node --max-old-space-size=1024 $pyright --project $config
         if ($LASTEXITCODE -ne 0) { throw "Python type checks failed: $config" }
     }
-    foreach ($test in @('test_desktop_lifecycle.py', 'test_touch_lifecycle.py', 'test_layout_lifecycle.py', 'test_fly_guides.py', 'test_icon_rendering.py', 'test_zoom_navigation.py', 'test_stroke_updates.py', 'test_pencil_toolbar.py', 'test_axis_spokes.py', 'test_pipe_editing.py', 'test_curve_fill.py', 'test_fill_process.py', 'test_fill_viewport.py', 'test_api_registry.py', 'test_agent_cli.py', 'test_agent_chat.py', 'test_agent_mcp.py', 'test_shortcuts.py', 'test_print_field.py', 'test_extrusion.py', 'test_erase_geometry.py')) {
+    foreach ($test in @('test_desktop_lifecycle.py', 'test_touch_lifecycle.py', 'test_layout_lifecycle.py', 'test_fly_guides.py', 'test_icon_rendering.py', 'test_zoom_navigation.py', 'test_stroke_updates.py', 'test_pencil_toolbar.py', 'test_axis_spokes.py', 'test_pipe_editing.py', 'test_curve_fill.py', 'test_fill_process.py', 'test_fill_viewport.py', 'test_api_registry.py', 'test_agent_cli.py', 'test_agent_chat.py', 'test_agent_mcp.py', 'test_shortcuts.py', 'test_print_field.py', 'test_extrusion.py', 'test_erase_geometry.py', 'test_sketch_surface.py')) {
         & $Python (Join-Path $appRoot "tests/$test")
         if ($LASTEXITCODE -ne 0) { throw "Lightweight regression failed: $test" }
     }
@@ -63,20 +63,20 @@ try {
         try { $testLock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
         catch [IO.IOException] { throw 'Another engine validation is running in this checkout.' }
         try {
-            $tests = @('test_drawing.py', 'test_navigation.py', 'test_project.py', 'test_agent_native.py')
-            if ($UI) { $tests += @('test_ui.py', 'test_ui_lifecycle.py') }
+            $tests = @('test_drawing.py', 'test_navigation.py', 'test_project.py', 'test_agent_native.py', 'test_sketch_mesh_native.py')
+            if ($UI) { $tests += @('test_ui.py', 'test_ui_lifecycle.py', 'test_sketch_mesh_ui.py', 'test_cursor_views_ui.py') }
             foreach ($testName in $tests) {
                 $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $appRoot 'run.ps1'),
                     '-ProfileName', $testName.Replace('.py', ''), '-Script', (Join-Path $appRoot "tests/$testName"),
                     '-Threads', $Threads.ToString(), '-TimeoutSeconds', $TimeoutSeconds.ToString())
-                if ($testName.StartsWith('test_ui')) { $arguments += '-EnableEventSimulation' }
+                if ($testName -match '(^test_ui|_ui\.py$)') { $arguments += '-EnableEventSimulation' }
                 else { $arguments += '-Background' }
                 if ($Engine) { $arguments += @('-Engine', $Engine) }
                 & powershell.exe @arguments
                 if ($LASTEXITCODE -ne 0) { throw "Engine regression failed: $testName" }
             }
             if ($UI) {
-                foreach ($reportName in @('ui-input-report.json', 'ui-lifecycle-report.json')) {
+                foreach ($reportName in @('ui-input-report.json', 'ui-lifecycle-report.json', 'sketch-mesh-ui-report.json', 'cursor-views-ui-report.json')) {
                     $report = Get-Content -LiteralPath (Join-Path $appRoot ".checks/$reportName") -Raw | ConvertFrom-Json
                     if (-not $report.passed) { throw "UI assertions failed; inspect .checks/$reportName" }
                 }

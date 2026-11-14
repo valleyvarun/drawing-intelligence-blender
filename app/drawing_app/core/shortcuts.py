@@ -38,8 +38,8 @@ class Shortcut:
     ctrl: bool = False
     shift: bool = False
     alt: bool = False
-    # App tools ("select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "grease") it is
-    # limited to or skips.
+    # App tools ("select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "sketch",
+    # "grease") it is limited to or skips.
     only: tuple[str, ...] = ()
     skip: tuple[str, ...] = ()
     # Whether holding the key down repeats the command; otherwise repeats are swallowed.
@@ -48,7 +48,12 @@ class Shortcut:
     viewport: bool = False
     # "PRESS", or "DOUBLE_CLICK" for the second press of a double-click (the first press acts as usual).
     value: str = "PRESS"
+    # Only while a Sketch Mesh sketch is open, whether its brush is up or down.
+    sketching: bool = False
 
+
+# The drawing tools, where a click draws and Delete is not for the selection.
+DRAWING: tuple[str, ...] = ("paint", "pipe", "printer", "extruder", "sketch", "grease")
 
 SHORTCUTS: tuple[Shortcut, ...] = (
     # Add. Shift+A opens the app's Create menu at the pointer instead of Blender's Add menu.
@@ -68,9 +73,18 @@ SHORTCUTS: tuple[Shortcut, ...] = (
         "plane",
         "clicked",
         "Make the double-clicked drawing plane the active one",
-        skip=("paint", "pipe", "printer", "extruder", "grease"),
+        skip=DRAWING,
         viewport=True,
         value="DOUBLE_CLICK",
+    ),
+    # Groups. New strokes and objects go into the active group.
+    Shortcut(
+        "G",
+        "layer",
+        ("sibling", ""),
+        "New drawing group beside the active one; it becomes the active group",
+        ctrl=True,
+        repeat=False,
     ),
     # File
     Shortcut("N", "file", "new", "New drawing", ctrl=True),
@@ -81,8 +95,21 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("Z", "edit", "undo", "Undo", ctrl=True),
     Shortcut("Z", "edit", "redo", "Redo", ctrl=True, shift=True),
     Shortcut("D", "edit", "duplicate", "Duplicate the selection", ctrl=True),
-    Shortcut("DEL", "edit", "delete", "Delete the selection", skip=("paint", "pipe", "printer", "extruder", "grease")),
-    Shortcut("X", "edit", "delete", "Delete the selection", skip=("paint", "pipe", "printer", "extruder", "grease")),
+    Shortcut("DEL", "edit", "delete", "Delete the selection", skip=DRAWING),
+    Shortcut("X", "edit", "delete", "Delete the selection", skip=DRAWING),
+    # Sketch Mesh, with its brush up or down. Esc puts the brush down, then asks to cancel (see FIXED).
+    Shortcut("RET", "sketch", "confirm", "Sketch Mesh: build the mesh through the drawn lines", sketching=True),
+    Shortcut(
+        "NUMPAD_ENTER", "sketch", "confirm", "Sketch Mesh: build the mesh through the drawn lines", sketching=True
+    ),
+    Shortcut(
+        "B",
+        "sketch",
+        ("brush", "toggle"),
+        "Sketch Mesh: pick the brush up, or put it down",
+        repeat=False,
+        sketching=True,
+    ),
     # Navigation. N replaces Blender's sidebar key, which the app blocks.
     Shortcut("N", "navigation", "next", "Switch right-drag navigation: Orbit, Fly, Walk", repeat=False),
     # View. In Grease Pencil Draw, F is Blender's brush-radius key instead.
@@ -102,7 +129,7 @@ SHORTCUTS: tuple[Shortcut, ...] = (
 COMMANDS: tuple[tuple[str, str, str], ...] = (
     (
         "tool",
-        '"select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "grease"',
+        '"select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "sketch", "grease"',
         "Choose an app tool",
     ),
     (
@@ -111,6 +138,11 @@ COMMANDS: tuple[tuple[str, str, str], ...] = (
         "3D Printer flow / particles per drop / particle size / drop height / stickiness",
     ),
     ("extruder", '("flow", metres/s) / ("drop", metres)', "3D Extruder flow / drop height"),
+    (
+        "sketch",
+        '"confirm" / "leave" / ("brush", True/False/"toggle") / ("closed", True/False) / ("curved", True/False)',
+        "Sketch Mesh: build the mesh / leave, asking first when lines would be lost / brush up or down / ...",
+    ),
     ("pencil", '("tool", "builtin.brush")', "Grease Pencil tool: builtin.brush (Draw), builtin_brush.Fill, ..."),
     ("pencil", '("tool", "builtin.box") / ("tool", "builtin.circle")', "Shape tool: Rectangle / Ellipse"),
     ("pencil", '("brush", "Ink Pen")', "Grease Pencil brush, by its Essentials name"),
@@ -118,6 +150,7 @@ COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("edit", '"undo", "redo", "select_all", "deselect_all", "duplicate", "delete"', "Edit menu commands"),
     ("menu", '"file", "edit", "view", "create", "rendering", "windows"', "Open that menu at the pointer"),
     ("create", '"cube", "sphere", "plane", "cylinder"', "Add an object at the 3D cursor (or the origin)"),
+    ("layer", '("sibling", "") / ("add", "")', "New drawing group beside the active one / at the top level"),
     ("plane", '"create" / "surface"', "New drawing plane / one on the clicked surface (viewport=True rows)"),
     ("plane", '"clicked"', "Activate the drawing plane under the pointer; elsewhere the click goes on"),
     ("frame", "None", "Frame the selection"),
@@ -133,6 +166,8 @@ COMMANDS: tuple[tuple[str, str, str], ...] = (
 # Keys that only apply in one situation; handled where noted. Reference only.
 FIXED: tuple[tuple[str, str], ...] = (
     ("Esc", "Return to the Select tool; cancel 3D cursor placement, a drag, Trim, or field editing"),
+    ("Esc in Sketch Mesh", "Put the brush down; with it down, ask whether to cancel the sketch (core/controller.py)"),
+    ("Enter / Esc in a question", "Yes / No (ui/overlay.py)"),
     ("Ctrl+Z while drawing", "Cancel the stroke being drawn (tools/drawing.py via the controller)"),
     ("Left click / drag", "Select, or draw with the active tool; Shift adds to the selection"),
     ("Right drag", "Orbit, Fly, or Walk, as chosen with N or the navigation menu (viewport/keymap.py)"),
@@ -161,9 +196,19 @@ BLOCKED_ALWAYS: frozenset[str] = frozenset(
 
 
 def shortcut_for(
-    key: str, ctrl: bool, shift: bool, alt: bool, tool: str, over_viewport: bool, value: str = "PRESS"
+    key: str,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    tool: str,
+    over_viewport: bool,
+    value: str = "PRESS",
+    sketching: bool = False,
 ) -> Shortcut | None:
-    """The first shortcut for a press with exactly these modifiers, the given app tool, and pointer place."""
+    """The first shortcut for a press with exactly these modifiers, the given app tool, and pointer place.
+
+    `sketching` says a Sketch Mesh sketch is open, which its own rows need.
+    """
     shortcut: Shortcut
     for shortcut in SHORTCUTS:
         if (shortcut.key, shortcut.ctrl, shortcut.shift, shortcut.alt, shortcut.value) != (
@@ -177,6 +222,8 @@ def shortcut_for(
         if (shortcut.only and tool not in shortcut.only) or tool in shortcut.skip:
             continue
         if shortcut.viewport and not over_viewport:
+            continue
+        if shortcut.sketching and not sketching:
             continue
         return shortcut
     return None

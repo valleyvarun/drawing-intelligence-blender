@@ -18,6 +18,8 @@ from .state import (
     EXTRUDER_LIMITS,
     NAVIGATION_MODES,
     PRINTER_LIMITS,
+    SKETCH_DETAIL,
+    SKETCH_LINE_LIMITS,
     TOOLS,
     WALK_LIMITS,
     AppState,
@@ -140,13 +142,22 @@ def set_tool(name: str) -> None:
         return
     state: AppState = get_state()
     state.tool = cast(Tool, name)
+    # A sketch opens with its brush up, stays open while Select, Move, Rotate, or Scale is used with the
+    # brush down, and is closed by any other tool.
+    if name == "sketch":
+        state.sketching = True
+    elif name not in ("select", "move", "rotate", "scale"):
+        state.sketching = False
     state.status = {
         "paint": "Paint: drag to draw on the active canvas",
         "pipe": "Pipe: drag a 3D stroke",
         "printer": "3D Printer: hold and drag to pour; the print keeps forming as it settles",
         "extruder": "3D Extruder: hold and drag to squeeze out a tube; hold still to coil it",
+        "sketch": "Sketch Mesh: draw the lines of a surface. Esc puts the brush down; Enter builds the mesh",
         "grease": "Grease Pencil: Blender's Draw mode on the active canvas",
     }.get(name, "")
+    if state.sketching and name != "sketch":
+        state.status = "Sketch Mesh: brush down. Move your drawing planes, then pick the brush up (B) to draw again"
     area: Any
     region: Any
     area, region = viewport_context()
@@ -435,6 +446,52 @@ def _agent_command(payload: tuple[object, ...]) -> None:
         agent.set_web(argument)
 
 
+def _sketch_command(payload: object) -> None:
+    """Sketch Mesh: its brush and settings, and building, leaving, or cancelling the sketch.
+
+    "leave" asks first when the sketch has lines, since leaving removes them; "cancel" is the answer Yes.
+    """
+    from ..tools import sketch_mesh
+
+    state: AppState = get_state()
+    if payload in ("confirm", "cancel", "leave"):
+        # A line still being drawn joins the sketch first.
+        if _ACTIVE is not None and _ACTIVE.drawing.is_drawing:
+            _ACTIVE.drawing.finish(bpy.context)
+        if payload == "confirm":
+            if sketch_mesh.confirm(bpy.context) is not None:
+                _undo_push("Sketch Mesh")
+        elif payload == "leave" and sketch_mesh.lines(bpy.context):
+            from ..ui import overlay
+
+            overlay.ask("Do you want to cancel?", "The lines you drew will be removed.", "sketch", "cancel")
+        else:
+            removed: bool = sketch_mesh.cancel(bpy.context)
+            state.sketching = False
+            set_tool("select")
+            if removed:
+                state.status = "Sketch cancelled"
+                _undo_push("Cancel sketch")
+        return
+    if not isinstance(payload, tuple) or len(payload) != 2:
+        return
+    name: object = payload[0]
+    value: object = payload[1]
+    if name == "brush" and (isinstance(value, bool) or value == "toggle"):
+        # The brush is up while the tool is "sketch"; putting it down leaves the sketch open.
+        up: bool = state.tool != "sketch" if value == "toggle" else bool(value)
+        if up != (state.tool == "sketch"):
+            if _ACTIVE is not None and _ACTIVE.drawing.is_drawing:
+                _ACTIVE.drawing.finish(bpy.context)
+            set_tool("sketch" if up else "select")
+    elif name == "radius" and isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value):
+        state.brushes["sketch"].radius = max(SKETCH_LINE_LIMITS[0], min(SKETCH_LINE_LIMITS[1], float(value)))
+    elif name in ("closed", "curved") and isinstance(value, bool):
+        setattr(state.sketch, str(name), value)
+    elif name == "detail" and isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value):
+        state.sketch.detail = round(max(SKETCH_DETAIL[0], min(SKETCH_DETAIL[1], float(value))))
+
+
 def _window_command(command: str) -> None:
     from .. import agent
     from ..ui import scripting
@@ -464,8 +521,14 @@ def _layer_command(payload: tuple[str, str]) -> None:
         return
     if operation in ("group", "ungroup", "select", "delete"):
         _leave_pencil()
-    if operation == "add":
-        layers.create_group(context)
+    if operation in ("add", "sibling"):
+        from ..ui import overlay
+
+        # At the top level, or beside the active group. New strokes and objects then go into it, and
+        # Clayers scrolls to show it.
+        created: str = layers.create_group(context) if operation == "add" else layers.create_sibling_group(context)
+        get_state().status = "New active group: " + created.removeprefix("collection:")
+        overlay.reveal_layer(created)
     elif operation == "group":
         layers.create_group(context, selected=True)
     elif operation == "ungroup":
@@ -606,6 +669,8 @@ def dispatch(action: str, payload: object = None) -> None:
             if choice in EXTRUDER_LIMITS and isinstance(measure, (float, int)) and math.isfinite(measure):
                 span: tuple[float, float] = EXTRUDER_LIMITS[str(choice)]
                 setattr(state.extruder, str(choice), max(span[0], min(span[1], float(measure))))
+        elif action == "sketch":
+            _sketch_command(payload)
         elif action == "walk" and isinstance(payload, tuple) and len(payload) == 2:
             setting: object = payload[0]
             amount: object = payload[1]
@@ -906,6 +971,8 @@ class DRAWING_OT_session(bpy.types.Operator):
     previous_tick: float
     previous_panel_tick: float
     previous_motion_tick: float
+    # The 3D cursor's plane last given to Grease Pencil, which keeps its own copy of it.
+    cursor_axis: int
     closed: bool
 
     def invoke(self, context: Any, event: Any) -> set[str]:
@@ -917,6 +984,7 @@ class DRAWING_OT_session(bpy.types.Operator):
         self.previous_tick = time.monotonic()
         self.previous_panel_tick = self.previous_tick
         self.previous_motion_tick = 0.0
+        self.cursor_axis = get_state().cursor_axis
         self.closed = False
         self.timer = context.window_manager.event_timer_add(1.0 / 120.0, window=context.window)
         context.window_manager.modal_handler_add(self)
@@ -957,6 +1025,14 @@ class DRAWING_OT_session(bpy.types.Operator):
                         from ..tools import pencil
 
                         pencil.sync_shelf(viewport_area)
+                    cursor_axis: int = get_state().cursor_axis
+                    if cursor_axis != self.cursor_axis and not self.navigation.active:
+                        self.cursor_axis = cursor_axis
+                        if get_state().tool == "grease" and get_state().cursor_active and get_state().cursor_placed:
+                            from ..tools import pencil
+
+                            # An axis view turned the 3D cursor's plane; Draw mode follows it.
+                            _in_viewport(pencil.refresh)
             if now - self.previous_panel_tick >= 0.25:
                 panel: Any
                 for panel in context.window.screen.areas:
@@ -995,12 +1071,14 @@ class DRAWING_OT_session(bpy.types.Operator):
             event.type == "ESC"
             and event.value == "PRESS"
             and not get_state().cursor_placing
-            and get_state().tool != "select"
+            and (get_state().tool != "select" or get_state().sketching)
         ):
-            from ..tools import pencil
-
             self.drawing.clear_hover()
-            dispatch("tool", "select")
+            if get_state().sketching:
+                # Esc puts a sketch's brush down and keeps the sketch; with the brush down it asks to cancel.
+                dispatch("sketch", ("brush", False) if get_state().tool == "sketch" else "leave")
+            else:
+                dispatch("tool", "select")
             return {"RUNNING_MODAL"}
         if event.type in ("LEFTMOUSE", "MOUSEMOVE", "INBETWEEN_MOUSEMOVE") and layout.on_divider(
             context, int(event.mouse_x), int(event.mouse_y)
@@ -1046,6 +1124,7 @@ class DRAWING_OT_session(bpy.types.Operator):
                     get_state().tool,
                     area.type == "VIEW_3D",
                     str(event.value),
+                    get_state().sketching,
                 )
                 if shortcut is not None:
                     if shortcut.repeat or not getattr(event, "is_repeat", False):

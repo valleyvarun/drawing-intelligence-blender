@@ -50,11 +50,40 @@ Args:
     normal: Direction a paint stroke faces, as [x, y, z]; defaults to up.
 ```
 
+### `sketch_mesh`
+
+```python
+@tool(undo='Sketch Mesh')
+def sketch_mesh(lines: list[list[list[float]]], closed: bool=False, curved: bool=True, detail: int=24, color: str | None=None, radius: float | None=None) -> JsonObject
+```
+
+```text
+Build a mesh surface through 3D lines, as the Sketch Mesh tool does with lines drawn by hand.
+
+The lines are the surface's skeleton, and how they lie decides how it is made. Lines that do not
+touch are ribs: the surface is lofted from one to the next (rings make a tube; closed, the ends
+are capped). Lines that touch and can be seen whole from one side make a sheet that ends at the
+outermost lines (closed: a solid with walls down to a flat base, or a flat outline inflated into
+a rounded shape). Lines that surround a shape, such as a box's edges, are wrapped as a shell
+(open: the widest opening the lines surround is left open). The mesh follows the lines
+approximately.
+
+Args:
+    lines: Each line as [x, y, z] points in metres, in order; at least two points per line. A line
+        whose ends meet is a closed loop. Give enough points for curves to keep their shape.
+    closed: Make a watertight solid instead of an open sheet.
+    curved: Bend smoothly through the lines; False joins them with flat faces.
+    detail: About how many faces span the surface, from 8 to 64.
+    color: Hex colour such as "#FF8000" or a preset name; defaults to the Sketch Mesh tool's colour.
+    radius: The lines' radius in metres, as if drawn with the tool: a line's end within four radii
+        of another line is joined to it. Defaults to the tool's line size.
+```
+
 ### `set_tool`
 
 ```python
 @tool()
-def set_tool(tool: Literal['select', 'move', 'rotate', 'scale', 'paint', 'pipe', 'printer', 'extruder', 'grease']) -> JsonObject
+def set_tool(tool: Literal['select', 'move', 'rotate', 'scale', 'paint', 'pipe', 'printer', 'extruder', 'sketch', 'grease']) -> JsonObject
 ```
 
 ```text
@@ -63,14 +92,15 @@ Switch the app's active tool, as clicking it in the Tool Box does.
 Args:
     tool: "select", "move", "rotate", "scale", "paint", "pipe", "printer" (3D Printer, which pours
         material that settles into a mesh), "extruder" (3D Extruder, which squeezes out a tube that
-        falls, stacks, and coils like toothpaste), or "grease" (Grease Pencil Draw).
+        falls, stacks, and coils like toothpaste), "sketch" (Sketch Mesh, whose drawn lines become
+        a surface when confirmed), or "grease" (Grease Pencil Draw).
 ```
 
 ### `set_color`
 
 ```python
 @tool()
-def set_color(color: str, tool: Literal['all', 'paint', 'pipe', 'printer', 'extruder', 'grease']='all') -> JsonObject
+def set_color(color: str, tool: Literal['all', 'paint', 'pipe', 'printer', 'extruder', 'sketch', 'grease']='all') -> JsonObject
 ```
 
 ```text

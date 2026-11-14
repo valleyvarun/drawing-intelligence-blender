@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 if TYPE_CHECKING:
-    from drawing_app.core.state import AppState, Vec3
+    from drawing_app.core.state import AppState, Brush, Vec3
     from drawing_app.tools.drawing import DrawingController
     from drawing_app.tools.geometry import Sample
     from drawing_app.tools.preview import BrushPreview
@@ -170,6 +170,9 @@ class AxisSpokeTests(unittest.TestCase):
         layers: ModuleType = ModuleType("_spoke.tools.layers")
         setattr(layers, "plane_equation", MagicMock())
         setattr(layers, "selected_plane", MagicMock())
+        name: str
+        for name in ("ensure_scene", "can_draw", "link_stroke"):
+            setattr(layers, name, MagicMock())
         preview: ModuleType = ModuleType("_spoke.tools.preview")
         setattr(preview, "BrushPreview", MagicMock())
         surface: ModuleType = ModuleType("_spoke.tools.surface")
@@ -204,7 +207,7 @@ class AxisSpokeTests(unittest.TestCase):
         self.controller: DrawingController = cast("DrawingController", self.drawing.DrawingController())
         self.stroke: MagicMock = MagicMock()
         self.controller._object = self.stroke
-        self.controller._kind = "pipe"
+        self.controller._kind = self.controller._tool = "pipe"
         self.controller._scene = self.context.scene
         self.controller._area = self.area
         self.controller._region = self.region
@@ -264,6 +267,49 @@ class AxisSpokeTests(unittest.TestCase):
                 self.controller.finish(self.context)
             self.bpy.ops.ed.undo_push.assert_called_once_with(message="3D pipe stroke")
             self.assertFalse(self.controller.is_drawing)
+
+    def test_sketch_mesh_lines_are_round_pipes_of_one_width_marked_as_the_sketch(self) -> None:
+        self.controller._object = None
+        self.state.tool = "sketch"
+        self.state.axes_spokes = False
+        brush: Brush = self.state.brushes["sketch"]
+        brush.radius, brush.shape, brush.opacity = 0.05, "square", 0.3
+        brush.pressure_size = brush.pressure_opacity = True
+        press: SimpleNamespace = SimpleNamespace(
+            type="LEFTMOUSE", value="PRESS", mouse_x=500.0, mouse_y=500.0, is_tablet=True, pressure=0.2
+        )
+        created: MagicMock
+        with (
+            patch.dict(sys.modules, self.modules),
+            patch.object(self.drawing, "write_mesh"),
+            patch.object(self.drawing, "stroke_object") as created,
+        ):
+            self.assertTrue(self.controller.begin(self.context, press, self.area, self.region))
+        self.assertEqual((self.controller._tool, self.controller._kind), ("sketch", "pipe"))
+        created.assert_called_once_with(self.context, "pipe", self.controller._brush, sketch=True)
+        # A light stylus touch does not thin the line, and the sketch's own settings stay as they were.
+        self.assertEqual((self.controller._brush.shape, self.controller._brush.pressure_size), ("circle", False))
+        self.assertEqual((self.controller._samples[0].radius, self.controller._samples[0].opacity), (0.05, 1.0))
+        self.assertEqual((brush.shape, brush.pressure_size), ("square", True))
+        # Leaving the tool finishes the line; the status tells how to build the mesh.
+        with patch.dict(sys.modules, self.modules), patch.object(self.drawing, "write_mesh"):
+            self.controller.finish(self.context)
+        self.assertIn("Enter builds the mesh", self.state.status)
+        self.assertFalse(self.controller.is_drawing)
+
+    def test_a_sketch_line_object_is_a_pipe_carrying_the_sketch_mark(self) -> None:
+        brush: Brush = self.state.brushes["sketch"]
+        with patch.dict(sys.modules, self.modules):
+            line: MagicMock = self.drawing.stroke_object(self.context, "pipe", brush, sketch=True)
+            pipe: MagicMock = self.drawing.stroke_object(self.context, "pipe", brush)
+        self.assertEqual(self.bpy.data.meshes.new.call_args_list[0].args, ("Sketch Line",))
+        self.assertEqual(self.bpy.data.meshes.new.call_args_list[1].args, ("Pipe Stroke",))
+        line.__setitem__.assert_any_call(self.drawing.SKETCH, True)
+        line.__setitem__.assert_any_call("drawing_kind", "pipe")
+        self.assertIs(pipe, line)
+        # The plain pipe made second set no mark: the one call above is the sketch line's.
+        marks: list[object] = [call for call in line.__setitem__.call_args_list if call.args[0] == self.drawing.SKETCH]
+        self.assertEqual(len(marks), 1)
 
     def test_sub_spacing_corner_is_preserved(self) -> None:
         self.controller._brush.radius = 1.0

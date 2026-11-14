@@ -38,6 +38,7 @@ _BLENDER_ICONS: dict[str, str] = {
     "shape": "app.shape.dat",
     "printer": "app.printer.dat",
     "extruder": "app.extruder.dat",
+    "sketch": "app.sketch.dat",
     "builtin.eyedropper": "ops.paint.eyedropper_add.dat",
 }
 _IMAGES: dict[str, Any] = {}
@@ -341,6 +342,13 @@ def icon(name: str, x: float, y: float, size: float, color: Color = TEXT) -> Non
         line([(cx - r, cy - r * 0.6), (cx + r, cy + r * 0.6)], color, 3)
         line([(cx - r * 0.5, cy), (cx - r * 0.3, cy - r * 0.35)], color)
         line([(cx, cy + r * 0.3), (cx + r * 0.2, cy - r * 0.05)], color)
+    elif name == "check":
+        # A green tick: confirm.
+        line([(cx - r, cy), (cx - r * 0.3, cy - r * 0.75), (cx + r, cy + r * 0.75)], (0.45, 0.86, 0.52, 1), 2.5)
+    elif name == "cancel":
+        # A red cross: cancel.
+        line([(cx - r * 0.8, cy - r * 0.8), (cx + r * 0.8, cy + r * 0.8)], (0.93, 0.45, 0.42, 1), 2.5)
+        line([(cx - r * 0.8, cy + r * 0.8), (cx + r * 0.8, cy - r * 0.8)], (0.93, 0.45, 0.42, 1), 2.5)
     elif name == "on_object":
         polygon(
             [

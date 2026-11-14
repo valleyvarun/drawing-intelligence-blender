@@ -11,14 +11,29 @@ from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
 Vec3: TypeAlias = tuple[float, float, float]
-Tool: TypeAlias = Literal["select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "grease"]
-TOOLS: tuple[str, ...] = ("select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "grease")
+Tool: TypeAlias = Literal[
+    "select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "sketch", "grease"
+]
+TOOLS: tuple[str, ...] = (
+    "select",
+    "move",
+    "rotate",
+    "scale",
+    "paint",
+    "pipe",
+    "printer",
+    "extruder",
+    "sketch",
+    "grease",
+)
 # Tools with their own brush and colour.
-DRAWING_TOOLS: tuple[str, ...] = ("paint", "pipe", "printer", "extruder", "grease")
+DRAWING_TOOLS: tuple[str, ...] = ("paint", "pipe", "printer", "extruder", "sketch", "grease")
 # Tools that drop material from a nozzle above the canvas point, so it lands where it falls.
 NOZZLE_TOOLS: tuple[str, ...] = ("printer", "extruder")
 # Tools whose strokes the app draws itself with a brush outline under the pointer.
-STROKE_TOOLS: tuple[str, ...] = ("paint", "pipe", "printer", "extruder")
+STROKE_TOOLS: tuple[str, ...] = ("paint", "pipe", "printer", "extruder", "sketch")
+# Tools whose strokes are pipes: 3D Pipe, and Sketch Mesh, whose lines wait to become a surface.
+PIPE_TOOLS: tuple[str, ...] = ("pipe", "sketch")
 ROOT: Path = Path(__file__).resolve().parents[3]
 CONFIG: Path = (ROOT / os.environ.get("DRAWING_APP_CONFIG", "runtime/config")).resolve()
 if not CONFIG.is_relative_to(ROOT):
@@ -108,12 +123,14 @@ class Brush:
 
 
 def _brushes() -> dict[str, Brush]:
-    # The 3D Printer's radius is its nozzle's: particles fall within that circle. The 3D Extruder's is its tube's.
+    # The 3D Printer's radius is its nozzle's: particles fall within that circle. The 3D Extruder's is its tube's,
+    # and Sketch Mesh's is its lines'.
     return {
         "paint": Brush(),
         "pipe": Brush(),
         "printer": Brush(radius=0.03),
         "extruder": Brush(radius=0.01),
+        "sketch": Brush(radius=0.01),
         "grease": Brush(),
     }
 
@@ -166,6 +183,25 @@ class Extruder:
     drop: float = 0.08
 
 
+# Sketch Mesh detail: about how many faces span the sketch.
+SKETCH_DETAIL: tuple[int, int] = (8, 64)
+# The radius of a sketch line in metres.
+SKETCH_LINE_LIMITS: tuple[float, float] = (0.001, 0.2)
+
+
+@dataclass
+class SketchMesh:
+    """Sketch Mesh: the surface built through the drawn lines.
+
+    Closed makes a watertight solid instead of a sheet that ends at the outermost lines. Curved bends smoothly
+    through the lines; straight joins them with flat faces.
+    """
+
+    closed: bool = False
+    curved: bool = True
+    detail: int = 24
+
+
 @dataclass
 class Pencil:
     """Native Grease Pencil choices; radius and strength stay on Blender's brush assets."""
@@ -186,6 +222,9 @@ class Pencil:
 @dataclass
 class AppState:
     tool: Tool = "select"
+    # A Sketch Mesh sketch is open. Its brush is up while the tool is "sketch"; with the brush down the
+    # tool is Select, Move, Rotate, or Scale, for moving drawing planes between lines.
+    sketching: bool = False
     theme: str = "light"
     units: str = "m"
     # Right-drag navigation: "orbit", "fly", or "walk".
@@ -213,6 +252,7 @@ class AppState:
     pencil: Pencil = field(default_factory=Pencil)
     printer: Printer = field(default_factory=Printer)
     extruder: Extruder = field(default_factory=Extruder)
+    sketch: SketchMesh = field(default_factory=SketchMesh)
     status: str = ""
     left_width: int = 220
     right_width: int = 280
@@ -247,6 +287,7 @@ def save_preferences() -> None:
     folder.mkdir(parents=True, exist_ok=True)
     payload: dict[str, object] = asdict(_STATE)
     payload["tool"] = "select"
+    payload["sketching"] = False
     payload["cursor_placing"] = False
     temporary: Path = folder / f"drawing-preferences-{os.getpid()}.tmp"
     destination: Path = folder / "drawing-preferences.json"
@@ -327,6 +368,7 @@ def load_preferences() -> None:
         restore_pencil(data.get("pencil"))
         restore_printer(data.get("printer"))
         restore_extruder(data.get("extruder"))
+        restore_sketch(data.get("sketch"))
         restore_window(data.get("window_geometry"), data.get("window_maximized"))
     except (OSError, ValueError, TypeError):
         _STATE.status = "Saved preferences could not be read; using defaults."
@@ -370,6 +412,20 @@ def restore_extruder(payload: object) -> None:
         value: object = data.get(name)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             setattr(_STATE.extruder, name, max(limits[0], min(limits[1], float(value))))
+
+
+def restore_sketch(payload: object) -> None:
+    if not isinstance(payload, dict):
+        return
+    data: dict[str, object] = cast(dict[str, object], payload)
+    name: str
+    for name in ("closed", "curved"):
+        value: object = data.get(name)
+        if isinstance(value, bool):
+            setattr(_STATE.sketch, name, value)
+    detail: object = data.get("detail")
+    if isinstance(detail, (int, float)) and not isinstance(detail, bool) and math.isfinite(detail):
+        _STATE.sketch.detail = round(max(SKETCH_DETAIL[0], min(SKETCH_DETAIL[1], float(detail))))
 
 
 def restore_pencil(payload: object) -> None:
@@ -420,7 +476,8 @@ def restore_brushes(payload: object, *, colors: bool = True) -> None:
             if isinstance(value, bool):
                 setattr(brush, name, value)
         shape: object = data.get("shape")
-        if shape in ("circle", "square", "triangle"):
+        # Sketch Mesh lines are always round.
+        if shape in ("circle", "square", "triangle") and kind != "sketch":
             brush.shape = str(shape)
         color: Vec3 | None = clean_color(data.get("color")) if colors else None
         if color is not None:

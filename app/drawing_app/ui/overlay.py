@@ -13,6 +13,8 @@ from ..core.state import (
     EXTRUDER_LIMITS,
     NOZZLE_LIMITS,
     PRINTER_LIMITS,
+    SKETCH_DETAIL,
+    SKETCH_LINE_LIMITS,
     TUBE_LIMITS,
     WALK_LIMITS,
     AppState,
@@ -26,7 +28,7 @@ from ..core.state import (
     srgb_to_linear,
 )
 from . import chat, layout, menus, paint
-from .widgets import Edit, MenuItem, Popup, PopupSlider, Rect, Widget, hit
+from .widgets import Edit, MenuItem, Popup, PopupSlider, Question, Rect, Widget, hit
 
 __all__: list[str] = ["Edit", "MenuItem", "Popup", "Rect", "Widget"]
 
@@ -37,6 +39,8 @@ _SCROLL: dict[str, float] = {"toolbox": 0.0, "layers": 0.0}
 _LIMITS: dict[str, float] = {}
 _COLLAPSED: set[str] = set()
 _SELECTED_LAYER: str = ""
+# A Clayers row to bring into view the next time the list is drawn, such as a group just made.
+_REVEAL: str = ""
 # The Claude Code chat below the layers list, and the smallest Clayers and chat heights in UI units.
 _CHAT: chat.ChatPanel = chat.ChatPanel()
 PANEL_MINIMUMS: tuple[float, float] = (96.0, 180.0)
@@ -51,6 +55,8 @@ _DRAG_COLOR: Vec3 | None = None
 # Picker cache key -> hue, saturation, value shown by that picker.
 _HSV: dict[str, tuple[float, float, float]] = {}
 _POPUP: Popup | None = None
+# A yes-or-no question over the viewport; it holds all input until answered.
+_QUESTION: Question | None = None
 _HOVER: tuple[int, float, float] = (0, 0.0, 0.0)
 _HOVER_TIME: float = 0.0
 _CURRENT: list[Widget] = []
@@ -373,8 +379,10 @@ def _same_color(a: Vec3, b: Vec3) -> bool:
     return max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(a[2] - b[2])) < 1e-4
 
 
-def _swatches(x: float, y: float, width: float, colors: tuple[Vec3, ...], current: Vec3, tooltip: str) -> float:
-    """Preset colours for the active tool; the current one is outlined."""
+def _swatches(
+    x: float, y: float, width: float, colors: tuple[Vec3, ...], current: Vec3, tooltip: str, target: str = "tool"
+) -> float:
+    """Preset colours for the active tool, or the tool named by `target`; the current one is outlined."""
     count: int = len(colors)
     index: int
     color: Vec3
@@ -385,7 +393,7 @@ def _swatches(x: float, y: float, width: float, colors: tuple[Vec3, ...], curren
             paint.rect(left - 2, y - 2, sw + 4, 26, paint.SELECTED, 4)
         paint.rect(left, y, sw, 22, (*linear_to_srgb(color), 1), 3)
         _CURRENT.append(
-            Widget(f"tool_color_preset_{index}", (left, y, sw, 22), "color", ("tool", "rgb", color), tooltip=tooltip)
+            Widget(f"tool_color_preset_{index}", (left, y, sw, 22), "color", (target, "rgb", color), tooltip=tooltip)
         )
     return y - 34
 
@@ -750,13 +758,255 @@ def _extruder(state: AppState, x: float, y: float, width: float) -> float:
     return _swatches(x, y, width, SWATCHES, brush.color, "Preset color for this tool")
 
 
+def _sketch_modes(state: AppState, x: float, y: float, columns: int) -> float:
+    """The top of the Tool Box while a sketch is open: its icon, then the brush and the tools for moving things.
+
+    The brush draws the sketch's lines. With it down, clicks select, and Move, Rotate, and Scale work on drawing
+    planes and objects; the sketch stays open. Clicking the icon leaves the tool. Returns the next row's y.
+    """
+    y -= 20
+    _button(
+        "tool_sketch",
+        "",
+        x,
+        y,
+        38,
+        "sketch",
+        "leave",
+        selected=True,
+        icon="sketch",
+        tooltip="Sketch Mesh (click to leave)",
+        height=38,
+    )
+    up: bool = state.tool == "sketch"
+    modes: tuple[tuple[str, str, str, object, bool, str], ...] = (
+        (
+            "sketch_brush",
+            "pipe",
+            "sketch",
+            ("brush", not up),
+            up,
+            "Brush: draw the sketch's lines (B); Esc puts it down",
+        ),
+        ("tool_move", "move", "tool", "select" if state.tool == "move" else "move", state.tool == "move", "Move"),
+        (
+            "tool_rotate",
+            "rotate",
+            "tool",
+            "select" if state.tool == "rotate" else "rotate",
+            state.tool == "rotate",
+            "Rotate",
+        ),
+        ("tool_scale", "scale", "tool", "select" if state.tool == "scale" else "scale", state.tool == "scale", "Scale"),
+    )
+    index: int
+    key: str
+    icon: str
+    action: str
+    payload: object
+    selected: bool
+    tooltip: str
+    for index, (key, icon, action, payload, selected, tooltip) in enumerate(modes):
+        _button(
+            key,
+            "",
+            x + (index % columns) * 46,
+            y - 46 - (index // columns) * 46,
+            38,
+            action,
+            payload,
+            selected=selected,
+            icon=icon,
+            tooltip=tooltip,
+            height=38,
+        )
+    return y - ((len(modes) + columns - 1) // columns) * 46 - 30
+
+
+def _sketch(context: Any, state: AppState, x: float, y: float, width: float) -> float:
+    """Sketch Mesh settings: line size, open or closed, curved or straight, detail, and the sketch's buttons.
+
+    Returns the next row's y. The check and cross buttons appear once the sketch has lines. Every control names
+    the sketch's own brush, so it works with the brush up or down.
+    """
+    from ..tools import sketch_mesh
+
+    brush: Brush = state.brushes["sketch"]
+    factor: float = _units()[0]
+    hints: tuple[str, ...] = (
+        ("Esc puts the brush down.",)
+        if state.tool == "sketch"
+        else ("Brush is down: move your planes,", "then pick it up (B) to draw again.")
+    )
+    hint: str
+    for hint in hints:
+        paint.text(hint, x, y, 11, color=paint.MUTED, max_width=width)
+        y -= 16
+    y -= 10
+    y = _slider(
+        "radius",
+        f"Line Size ({state.units})",
+        brush.radius * factor,
+        x,
+        y,
+        width,
+        SKETCH_LINE_LIMITS[0] * factor,
+        SKETCH_LINE_LIMITS[1] * factor,
+        1 / factor,
+        "",
+        action="sketch",
+        # Sizes such as 0.015 shrink to fit rather than lose digits.
+        compact=True,
+    )
+    half: float = (width - 4) / 2
+    rows: tuple[tuple[str, str, tuple[tuple[str, bool, str], tuple[str, bool, str]]], ...] = (
+        (
+            "Surface",
+            "closed",
+            (
+                ("Open", False, "Open: a sheet that ends at the outermost lines"),
+                ("Closed", True, "Closed: a watertight solid"),
+            ),
+        ),
+        (
+            "Mesh",
+            "curved",
+            (
+                ("Curved", True, "Curved: bends smoothly through the lines"),
+                ("Straight", False, "Straight: flat faces from line to line"),
+            ),
+        ),
+    )
+    title: str
+    name: str
+    choices: tuple[tuple[str, bool, str], tuple[str, bool, str]]
+    for title, name, choices in rows:
+        paint.text(title, x, y)
+        y -= 31
+        index: int
+        label: str
+        value: bool
+        tooltip: str
+        for index, (label, value, tooltip) in enumerate(choices):
+            _button(
+                f"sketch_{label.lower()}",
+                label,
+                x + index * (half + 4),
+                y,
+                half,
+                "sketch",
+                (name, value),
+                selected=bool(getattr(state.sketch, name)) == value,
+                tooltip=tooltip,
+            )
+        y -= 30
+    # More detail follows the lines more closely with more, smaller faces.
+    y = _slider(
+        "detail",
+        "Detail (faces across)",
+        float(state.sketch.detail),
+        x,
+        y,
+        width,
+        float(SKETCH_DETAIL[0]),
+        float(SKETCH_DETAIL[1]),
+        1.0,
+        "",
+        action="sketch",
+    )
+    count: int = sketch_mesh.count(context)
+    if count:
+        paint.text(f"Sketch: {count} line" + ("" if count == 1 else "s"), x, y)
+        y -= 47
+        _button(
+            "sketch_confirm",
+            "",
+            x,
+            y,
+            38,
+            "sketch",
+            "confirm",
+            icon="check",
+            tooltip="Create the mesh through the lines (Enter)",
+            height=38,
+        )
+        _button(
+            "sketch_cancel",
+            "",
+            x + 46,
+            y,
+            38,
+            "sketch",
+            "leave",
+            icon="cancel",
+            tooltip="Cancel the sketch and remove its lines (asks first)",
+            height=38,
+        )
+        y -= 30
+    else:
+        paint.text("Draw the surface's lines,", x, y, 11, color=paint.MUTED, max_width=width)
+        y -= 16
+        paint.text("then press Enter.", x, y, 11, color=paint.MUTED, max_width=width)
+        y -= 26
+    # The lines' and the mesh's colour.
+    paint.text("Color", x, y)
+    y -= 31
+    y = _color_picker("tool_sketch", "sketch", brush.color, x, y, width, "Color for this tool only")
+    y = _swatches(x, y, width, SWATCHES, brush.color, "Preset color for this tool", "sketch")
+    paint.text("Method", x, y)
+    y -= 30
+    _checkbox("axes_spokes", "Axes spokes", x, y, state.axes_spokes, "option", ("axes_spokes", not state.axes_spokes))
+    return y - 28
+
+
+def _transform_fields(context: Any, state: AppState, x: float, y: float, width: float) -> float:
+    """Move, Rotate, or Scale: the active object's X, Y, and Z fields. Returns the next row's y."""
+    from ..tools import pencil
+
+    obj: Any = context.view_layer.objects.active
+    if pencil.editing(context):
+        paint.text("Selected strokes", x, y, 14)
+        y -= 24
+        paint.text("Use the gizmo or G / R / S", x, y, 11, max_width=width)
+        y -= 24
+        paint.text("Esc: finish transforming", x, y, 11, max_width=width)
+        return y
+    if obj is None or not obj.select_get():
+        paint.text("Select an object", x, y, color=paint.MUTED, max_width=width)
+        return y
+    kind: str = {"move": "location", "rotate": "rotation", "scale": "scale"}[state.tool]
+    vector: Any = obj.rotation_euler if state.tool == "rotate" else getattr(obj, kind)
+    unit_scale: float = float(context.scene.unit_settings.scale_length)
+    conversion: float = 180.0 / math.pi if state.tool == "rotate" else unit_scale if state.tool == "move" else 1.0
+    values: tuple[float, float, float] = (
+        float(vector[0]) * conversion,
+        float(vector[1]) * conversion,
+        float(vector[2]) * conversion,
+    )
+    return _xyz(
+        kind.title() + (f" ({state.units})" if kind == "location" else ""),
+        values,
+        x,
+        y,
+        width,
+        "transform",
+        (kind,),
+        kind,
+    )
+
+
 def _toolbox(context: Any, w: float, h: float) -> None:
     global _TOOLBOX_SELECTION
     from ..tools import pencil
 
     state: AppState = get_state()
-    selecting: bool = state.tool == "select"
-    selection: tuple[str, str] = (state.tool, state.pencil.tool if state.tool == "grease" else "")
+    sketching: bool = state.sketching
+    # The tool chooser shows while nothing is chosen; an open sketch with its brush down is still a chosen tool.
+    selecting: bool = state.tool == "select" and not sketching
+    selection: tuple[str, str] = (
+        "sketch" if sketching else state.tool,
+        state.pencil.tool if state.tool == "grease" else "",
+    )
     if selection != _TOOLBOX_SELECTION:
         _SCROLL["toolbox"] = 0.0
         _TOOLBOX_SELECTION = selection
@@ -774,6 +1024,7 @@ def _toolbox(context: Any, w: float, h: float) -> None:
                 ("pipe", "3D Pipe"),
                 ("printer", "3D Printer"),
                 ("extruder", "3D Extruder"),
+                ("sketch", "Sketch Mesh"),
                 *pencil.toolbox_tools(),
             ),
         ),
@@ -781,9 +1032,11 @@ def _toolbox(context: Any, w: float, h: float) -> None:
     )
     active_tool: str = state.pencil.tool if state.tool == "grease" else state.tool
     columns: int = max(1, min(4, int((width + 8) // 46)))
+    if sketching:
+        y = _sketch_modes(state, x, y, columns)
     title: str
     tools: tuple[tuple[str, str], ...]
-    for title, tools in groups:
+    for title, tools in () if sketching else groups:
         if not selecting and active_tool not in dict(tools):
             continue
         if selecting:
@@ -897,7 +1150,11 @@ def _toolbox(context: Any, w: float, h: float) -> None:
             )
             index += 1
         y -= 30
-    if state.tool == "grease":
+    if sketching:
+        if state.tool in ("move", "rotate", "scale"):
+            y = _transform_fields(context, state, x, y, width) - 34
+        y = _sketch(context, state, x, y, width)
+    elif state.tool == "grease":
         y = _pencil(context, x, y, width)
     elif state.tool == "printer":
         y = _printer(state, x, y, width)
@@ -952,32 +1209,7 @@ def _toolbox(context: Any, w: float, h: float) -> None:
         )
         y -= 28
     elif state.tool in ("move", "rotate", "scale"):
-        obj = context.view_layer.objects.active
-        if pencil.editing(context):
-            paint.text("Selected strokes", x, y, 14)
-            y -= 24
-            paint.text("Use the gizmo or G / R / S", x, y, 11, max_width=width)
-            y -= 24
-            paint.text("Esc: finish transforming", x, y, 11, max_width=width)
-        elif obj is None or not obj.select_get():
-            paint.text("Select an object", x, y, color=paint.MUTED, max_width=width)
-        else:
-            kind: str = {"move": "location", "rotate": "rotation", "scale": "scale"}[state.tool]
-            vector: Any = obj.rotation_euler if state.tool == "rotate" else getattr(obj, kind)
-            conversion: float = (
-                180.0 / math.pi if state.tool == "rotate" else unit_scale if state.tool == "move" else 1.0
-            )
-            values = (float(vector[0]) * conversion, float(vector[1]) * conversion, float(vector[2]) * conversion)
-            y = _xyz(
-                kind.title() + (f" ({state.units})" if kind == "location" else ""),
-                values,
-                x,
-                y,
-                width,
-                "transform",
-                (kind,),
-                kind,
-            )
+        y = _transform_fields(context, state, x, y, width)
     _LIMITS["toolbox"] = max(0.0, h - y + _SCROLL["toolbox"] - h + 15)
     if _LIMITS["toolbox"] > 0:
         thumb: float = max(25, h * h / (h + _LIMITS["toolbox"]))
@@ -1000,7 +1232,15 @@ def _selection_outline(x: float, y: float, w: float, h: float) -> None:
     )
 
 
+def reveal_layer(key: str) -> None:
+    """Scroll Clayers to a row, opening the groups that hold it, the next time the list is drawn."""
+    global _REVEAL
+    _REVEAL = key
+    layout.redraw()
+
+
 def _layers(context: Any, w: float, h: float) -> None:
+    global _REVEAL
     from ..tools.layers import LayerRow, layer_rows
 
     paint.rect(0, 0, w, h, paint.PANEL)
@@ -1015,9 +1255,18 @@ def _layers(context: Any, w: float, h: float) -> None:
     for index, label in enumerate(("V", "L", "A")):
         paint.text(label, w - 78 + index * control, top + 8)
     rows: list[LayerRow] = layer_rows(context)
+    row: LayerRow
+    if _REVEAL:
+        # Open every group above the row, nearest first: each one is the last shallower row before it.
+        depth: int | None = None
+        for row in reversed(rows):
+            if depth is None:
+                depth = int(row.depth) if str(row.key) == _REVEAL else None
+            elif int(row.depth) < depth:
+                _COLLAPSED.discard(str(row.key))
+                depth = int(row.depth)
     hidden_depth: int | None = None
     visible_rows: list[LayerRow] = []
-    row: LayerRow
     for row in rows:
         if hidden_depth is not None and int(row.depth) > hidden_depth:
             continue
@@ -1027,6 +1276,14 @@ def _layers(context: Any, w: float, h: float) -> None:
             hidden_depth = int(row.depth)
     # Clayers keeps its share of the panel's height at the top; the Claude Code chat gets the rest.
     split: float = _chat_height(h)
+    if _REVEAL:
+        for index, row in enumerate(visible_rows):
+            if str(row.key) == _REVEAL:
+                # Rows are 28 high; the lowest one shown sits 32 above the buttons under the list.
+                room: float = max(0.0, top - 28 - (split + 32))
+                _SCROLL["layers"] = max(index * 28 - room, min(index * 28, _SCROLL["layers"]))
+                break
+        _REVEAL = ""
     y: float = top - 28 + _SCROLL["layers"]
     for row in visible_rows:
         if split + 32 <= y <= top - 28:
@@ -1126,6 +1383,49 @@ def _viewport(context: Any, w: float, h: float) -> None:
                 ("Z axis", "view_axis", "Z"),
             ],
         )
+    if state.sketching:
+        from ..tools import sketch_mesh
+
+        # The sketch's buttons, next to where it is drawn: below the top row, where there is room at any width.
+        up: bool = state.tool == "sketch"
+        _button(
+            "sketch_brush_view",
+            "",
+            8,
+            y - 36,
+            34,
+            "sketch",
+            ("brush", not up),
+            selected=up,
+            icon="pipe",
+            tooltip="Brush: draw the sketch's lines (B); Esc puts it down",
+            height=30,
+        )
+        if sketch_mesh.count(context):
+            _button(
+                "sketch_confirm_view",
+                "",
+                47,
+                y - 36,
+                34,
+                "sketch",
+                "confirm",
+                icon="check",
+                tooltip="Create the mesh through the lines (Enter)",
+                height=30,
+            )
+            _button(
+                "sketch_cancel_view",
+                "",
+                86,
+                y - 36,
+                34,
+                "sketch",
+                "leave",
+                icon="cancel",
+                tooltip="Cancel the sketch and remove its lines (asks first)",
+                height=30,
+            )
     factor: float = _units()[0]
     unit: str = state.units
     navigation: list[object] = [
@@ -1281,6 +1581,86 @@ def _popup(w: float, h: float) -> None:
         row_top -= POPUP_SLIDER_ROW
 
 
+def ask(title: str, message: str, action: str, payload: object = None) -> None:
+    """Ask a yes-or-no question over the viewport. Yes or Enter runs the action; No or Esc does nothing."""
+    global _QUESTION
+    cancel_capture()
+    _QUESTION = Question(title, message, action, payload)
+    layout.redraw()
+
+
+def _answer(yes: bool) -> None:
+    global _QUESTION
+    question: Question | None = _QUESTION
+    _QUESTION = None
+    if question is not None and yes:
+        _emit(question.action, question.payload)
+    layout.redraw()
+
+
+def _question(w: float, h: float) -> None:
+    """The open question as a box in the middle of the viewport, with the rest dimmed behind it."""
+    if _QUESTION is None:
+        return
+    width: float = max(160.0, min(320.0, w - 24))
+    # Wrapped a little short of the box, as whole lines measure slightly wider than their words.
+    lines: list[tuple[int, int]] = paint.wrap(_QUESTION.message, width - 48, 12)
+    height: float = 92 + 17 * len(lines)
+    x: float = (w - width) / 2
+    y: float = max(8.0, (h - height) / 2)
+    paint.rect(0, 0, w, h, (0.0, 0.0, 0.0, 0.35))
+    paint.rect(x - 1, y - 1, width + 2, height + 2, (0.06, 0.06, 0.06, 1), 7)
+    paint.rect(x, y, width, height, (0.18, 0.19, 0.20, 1), 6)
+    paint.text(_QUESTION.title, x + 16, y + height - 28, 14, max_width=width - 32)
+    row: float = y + height - 52
+    start: int
+    end: int
+    for start, end in lines:
+        paint.text(_QUESTION.message[start:end], x + 16, row, 12, color=paint.MUTED)
+        row -= 17
+    half: float = (width - 40) / 2
+    # Yes is the answer Enter gives, so it is the highlighted one.
+    _button("question_yes", "Yes", x + 16, y + 14, half, "question", True, selected=True, tooltip="Yes (Enter)")
+    _button("question_no", "No", x + 24 + half, y + 14, half, "question", False, tooltip="No (Esc)")
+
+
+def _question_event(context: Any, event: Any) -> bool:
+    """Input while a question is open: Enter answers yes, a click on a button answers, and nothing gets past.
+
+    Esc has already answered no by the time an event comes here.
+    """
+    global _HOVER, _HOVER_TIME
+    if event.value == "PRESS" and event.type in ("RET", "NUMPAD_ENTER"):
+        _answer(True)
+        return True
+    moving: bool = event.type in ("MOUSEMOVE", "INBETWEEN_MOUSEMOVE")
+    if not moving and not (event.type == "LEFTMOUSE" and event.value == "PRESS"):
+        return True
+    scale: float = max(1.0, float(context.preferences.system.ui_scale))
+    area: Any
+    for area in context.window.screen.areas:
+        if layout.role(area) != "viewport":
+            continue
+        region: Any
+        for region in area.regions:
+            if region.type != "WINDOW":
+                continue
+            x: float = (event.mouse_x - region.x) / scale
+            y: float = (event.mouse_y - region.y) / scale
+            pointer: int = int(area.as_pointer())
+            if moving:
+                # The buttons light up under the pointer.
+                _HOVER = (pointer, x, y)
+                _HOVER_TIME = time.monotonic()
+                layout.redraw(context)
+            else:
+                buttons: list[Widget] = [item for item in _WIDGETS.get(pointer, []) if item.action == "question"]
+                widget: Widget | None = _widget_at(buttons, x, y)
+                if widget is not None:
+                    _answer(bool(widget.payload))
+    return True
+
+
 def _draw() -> None:
     global _CURRENT, _AREA, _SCALE
     context: Any = bpy.context
@@ -1307,6 +1687,7 @@ def _draw() -> None:
             _layers(context, w, h)
         else:
             _viewport(context, w, h)
+            _question(w, h)
         _popup(w, h)
         _WIDGETS[_AREA] = _CURRENT
         # Tooltips would cover an open menu.
@@ -1512,6 +1893,8 @@ def handle_event(context: Any, event: Any) -> bool:
     if event.type == "ESC" and event.value == "PRESS" and is_capturing():
         cancel_capture()
         return True
+    if _QUESTION is not None:
+        return _question_event(context, event)
     if _EDIT is not None and _editing(context, event):
         return True
     if _EDIT is not None and event.type == "LEFTMOUSE" and event.value == "PRESS":
@@ -1649,19 +2032,23 @@ def handle_event(context: Any, event: Any) -> bool:
 
 
 def is_capturing() -> bool:
-    """Keep an active field or drag alive when the pointer leaves its area."""
-    return _EDIT is not None or _DRAG is not None or _POPUP is not None
+    """Keep an active field, drag, menu, or question alive when the pointer leaves its area."""
+    return _EDIT is not None or _DRAG is not None or _POPUP is not None or _QUESTION is not None
 
 
 def cancel_capture() -> None:
-    """Discard unfinished field text and release pointer capture; a chat message stays as a draft."""
-    global _EDIT, _DRAG, _DRAG_COLOR, _POPUP
+    """Discard unfinished field text and release pointer capture; a chat message stays as a draft.
+
+    An open question is answered no.
+    """
+    global _EDIT, _DRAG, _DRAG_COLOR, _POPUP, _QUESTION
     if _EDIT is not None and _EDIT.widget.kind == "chat":
         _CHAT.draft = _EDIT.text
     _EDIT = None
     _DRAG = None
     _DRAG_COLOR = None
     _POPUP = None
+    _QUESTION = None
     layout.redraw()
 
 
@@ -1684,7 +2071,7 @@ def install(dispatch: Callable[[str, object], None]) -> None:
 
 
 def uninstall() -> None:
-    global _DISPATCH, _EDIT, _DRAG, _DRAG_COLOR, _POPUP
+    global _DISPATCH, _EDIT, _DRAG, _DRAG_COLOR, _POPUP, _QUESTION
     space: Any
     handle: Any
     for space, handle in _HANDLES:
@@ -1696,6 +2083,7 @@ def uninstall() -> None:
     _DRAG = None
     _DRAG_COLOR = None
     _POPUP = None
+    _QUESTION = None
     _DISPATCH = None
     if bpy.app.timers.is_registered(_show_tooltip):
         bpy.app.timers.unregister(_show_tooltip)

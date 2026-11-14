@@ -246,6 +246,22 @@ def create_group(context: Any, name: str = "Group", parent: str | None = None, s
     return f"collection:{collection.name}"
 
 
+def create_sibling_group(context: Any, name: str = "Group") -> str:
+    """A new group beside the active one, which becomes the active group.
+
+    It goes inside the group that holds the active group, or at the top level when the active group is there.
+    """
+    ensure_scene(context)
+    active: Any = bpy.data.collections.get(get_state().active_group)
+    parent: str | None = None
+    candidate: Any
+    for candidate in bpy.data.collections:
+        if active is not None and candidate.get(GROUP) and active.name in candidate.children:
+            parent = f"collection:{candidate.name}"
+            break
+    return create_group(context, name, parent)
+
+
 def ungroup(context: Any, key: str) -> None:
     collection: Any = _collection(key)
     if collection is None or not collection.get(GROUP) or collection.name == "Default Drawing":

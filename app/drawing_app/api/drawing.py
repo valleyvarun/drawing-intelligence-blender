@@ -147,19 +147,88 @@ def draw_stroke(
     }
 
 
+@tool(undo="Sketch Mesh")
+def sketch_mesh(
+    lines: list[list[list[float]]],
+    closed: bool = False,
+    curved: bool = True,
+    detail: int = 24,
+    color: str | None = None,
+    radius: float | None = None,
+) -> JsonObject:
+    """Build a mesh surface through 3D lines, as the Sketch Mesh tool does with lines drawn by hand.
+
+    The lines are the surface's skeleton, and how they lie decides how it is made. Lines that do not
+    touch are ribs: the surface is lofted from one to the next (rings make a tube; closed, the ends
+    are capped). Lines that touch and can be seen whole from one side make a sheet that ends at the
+    outermost lines (closed: a solid with walls down to a flat base, or a flat outline inflated into
+    a rounded shape). Lines that surround a shape, such as a box's edges, are wrapped as a shell
+    (open: the widest opening the lines surround is left open). The mesh follows the lines
+    approximately.
+
+    Args:
+        lines: Each line as [x, y, z] points in metres, in order; at least two points per line. A line
+            whose ends meet is a closed loop. Give enough points for curves to keep their shape.
+        closed: Make a watertight solid instead of an open sheet.
+        curved: Bend smoothly through the lines; False joins them with flat faces.
+        detail: About how many faces span the surface, from 8 to 64.
+        color: Hex colour such as "#FF8000" or a preset name; defaults to the Sketch Mesh tool's colour.
+        radius: The lines' radius in metres, as if drawn with the tool: a line's end within four radii
+            of another line is joined to it. Defaults to the tool's line size.
+    """
+    from ..tools import layers
+    from ..tools import sketch_mesh as builder
+    from ..tools.sketch_surface import DETAIL_LIMITS, SketchError, Surface, build
+
+    if not lines:
+        raise ToolError("lines needs at least one line")
+    paths: list[list[Vec3]] = []
+    line: list[list[float]]
+    for line in lines:
+        paths.append(_stroke_points(line))
+    faces_across: float = number(detail, "detail")
+    if not DETAIL_LIMITS[0] <= faces_across <= DETAIL_LIMITS[1]:
+        raise ToolError(f"detail must be between {DETAIL_LIMITS[0]} and {DETAIL_LIMITS[1]}")
+    brush: Brush = get_state().brushes["sketch"]
+    reach: float = to_units(_radius(radius, brush.radius))
+    if not layers.can_draw(bpy.context):
+        raise ToolError("The active drawing group is hidden or locked")
+    error: SketchError
+    try:
+        surface: Surface = build(paths, reach, bool(closed), bool(curved), round(faces_across))
+    except SketchError as error:
+        raise ToolError(str(error)) from error
+    mesh_color: Vec3 = parse_color(color) if color is not None else brush.color
+    obj: Any = builder.create_object(bpy.context, surface, mesh_color)
+    return {
+        "name": str(obj.name),
+        "group": group_of(obj),
+        "method": surface.method,
+        "vertices": len(surface.points),
+        "faces": len(surface.faces),
+        "closed": bool(closed),
+        "curved": bool(curved),
+        "color": hex_color(mesh_color),
+    }
+
+
 @tool()
 def set_tool(
-    tool: Literal["select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "grease"],
+    tool: Literal["select", "move", "rotate", "scale", "paint", "pipe", "printer", "extruder", "sketch", "grease"],
 ) -> JsonObject:
     """Switch the app's active tool, as clicking it in the Tool Box does.
 
     Args:
         tool: "select", "move", "rotate", "scale", "paint", "pipe", "printer" (3D Printer, which pours
             material that settles into a mesh), "extruder" (3D Extruder, which squeezes out a tube that
-            falls, stacks, and coils like toothpaste), or "grease" (Grease Pencil Draw).
+            falls, stacks, and coils like toothpaste), "sketch" (Sketch Mesh, whose drawn lines become
+            a surface when confirmed), or "grease" (Grease Pencil Draw).
     """
     from ..core import controller
 
+    if tool != "sketch":
+        # A script asking for another tool gets that tool, not a sketch with its brush down.
+        get_state().sketching = False
     controller.dispatch("tool", tool)
     return {"tool": get_state().tool}
 
@@ -174,7 +243,9 @@ def _colors() -> JsonObject:
 
 
 @tool()
-def set_color(color: str, tool: Literal["all", "paint", "pipe", "printer", "extruder", "grease"] = "all") -> JsonObject:
+def set_color(
+    color: str, tool: Literal["all", "paint", "pipe", "printer", "extruder", "sketch", "grease"] = "all"
+) -> JsonObject:
     """Set the drawing colour for every drawing tool, like the Tool Box picker, or for one tool.
 
     Args:

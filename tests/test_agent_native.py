@@ -121,6 +121,7 @@ def main() -> None:
             "set_tool",
             "set_color",
             "set_brush",
+            "sketch_mesh",
             "create_group",
             "set_active_group",
             "create_drawing_plane",
@@ -214,6 +215,7 @@ def main() -> None:
             "pipe": "#00FF00",
             "printer": "#00FF00",
             "extruder": "#00FF00",
+            "sketch": "#00FF00",
             "grease": "#00FF00",
         }
         colors = api.set_color("blue", tool="pipe")

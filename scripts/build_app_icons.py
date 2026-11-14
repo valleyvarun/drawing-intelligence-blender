@@ -6,6 +6,7 @@ Run from the repository root with any Python 3.11+:
 - app.shape.dat (Shape tool): Blender's box-primitive "+" with an overlapping square, circle, and triangle.
 - app.printer.dat (3D Printer): a nozzle, falling drops, and the mound they form.
 - app.extruder.dat (3D Extruder): a nozzle, the tube hanging from it, and the coiled pile it lays.
+- app.sketch.dat (Sketch Mesh): a bulging sheet drawn as its outline and the lines across it.
 
 The format (as in app/drawing_app/assets/blender/SOURCE.txt) is "VCO\\0", width and height bytes, two padding
 bytes, then x/y bytes for every vertex on a 256-unit canvas followed by RGBA bytes for every vertex. The "+"
@@ -157,6 +158,66 @@ def extruder_icon() -> list[Triangle]:
     return triangles
 
 
+def bezier(start: Point, control: Point, end: Point, steps: int = 10) -> list[Point]:
+    """Points along a quadratic curve from `start` to `end`, pulled toward `control`."""
+    points: list[Point] = []
+    step: int
+    for step in range(steps + 1):
+        t: float = step / steps
+        points.append(
+            (
+                (1 - t) ** 2 * start[0] + 2 * (1 - t) * t * control[0] + t**2 * end[0],
+                (1 - t) ** 2 * start[1] + 2 * (1 - t) * t * control[1] + t**2 * end[1],
+            )
+        )
+    return points
+
+
+def stroke(points: list[Point], width: float = WIDTH) -> list[Triangle]:
+    """A line of this width through the points, with round joins and ends."""
+    triangles: list[Triangle] = []
+    index: int
+    for index in range(len(points) - 1):
+        a: Point = points[index]
+        b: Point = points[index + 1]
+        length: float = math.hypot(b[0] - a[0], b[1] - a[1])
+        side: Point = (-(b[1] - a[1]) / length * width / 2.0, (b[0] - a[0]) / length * width / 2.0)
+        corners: list[Point] = [
+            (a[0] + side[0], a[1] + side[1]),
+            (b[0] + side[0], b[1] + side[1]),
+            (b[0] - side[0], b[1] - side[1]),
+            (a[0] - side[0], a[1] - side[1]),
+        ]
+        triangles += [(corners[0], corners[1], corners[2]), (corners[0], corners[2], corners[3])]
+    point: Point
+    for point in points:
+        triangles += fan(point, circle_points(point, width / 2.0, 8))
+    return triangles
+
+
+def sketch_icon() -> list[Triangle]:
+    """A sheet seen from above one corner: its curved outline, and one line each way bulging across it."""
+    left: Point = (22.0, 96.0)
+    front: Point = (136.0, 24.0)
+    right: Point = (234.0, 112.0)
+    back: Point = (116.0, 226.0)
+    edges: list[list[Point]] = [
+        bezier(left, (72.0, 44.0), front),
+        bezier(front, (198.0, 52.0), right),
+        bezier(right, (190.0, 190.0), back),
+        bezier(back, (52.0, 178.0), left),
+    ]
+    triangles: list[Triangle] = []
+    edge: list[Point]
+    for edge in edges:
+        triangles += stroke(edge)
+    # Each inner line joins the middles of two facing edges and rises toward the viewer between them.
+    middles: list[Point] = [edge[len(edge) // 2] for edge in edges]
+    triangles += stroke(bezier(middles[0], (160.0, 150.0), middles[2]))
+    triangles += stroke(bezier(middles[1], (112.0, 168.0), middles[3]))
+    return triangles
+
+
 def write_icon(path: Path, triangles: list[Triangle], color: Color) -> None:
     positions: bytearray = bytearray()
     triangle: Triangle
@@ -232,6 +293,7 @@ def main() -> None:
         "app.shape": shape_icon(plus),
         "app.printer": printer_icon(),
         "app.extruder": extruder_icon(),
+        "app.sketch": sketch_icon(),
     }
     name: str
     triangles: list[Triangle]

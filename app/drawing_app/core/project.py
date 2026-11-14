@@ -11,7 +11,15 @@ from pathlib import Path
 from typing import Any
 
 from .blender import bpy
-from .state import ROOT, get_state, restore_brushes, restore_extruder, restore_pencil, restore_printer
+from .state import (
+    ROOT,
+    get_state,
+    restore_brushes,
+    restore_extruder,
+    restore_pencil,
+    restore_printer,
+    restore_sketch,
+)
 
 SCENE_STATE: str = "drawing_app_state"
 # Blender writes compressed .blend files as Zstandard frames.
@@ -142,6 +150,7 @@ def restore_scene() -> None:
         restore_pencil(data.get("pencil"))
         restore_printer(data.get("printer"))
         restore_extruder(data.get("extruder"))
+        restore_sketch(data.get("sketch"))
     except (ValueError, TypeError, AttributeError):
         get_state().status = "Project drawing preferences could not be restored."
 

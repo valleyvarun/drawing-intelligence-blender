@@ -68,5 +68,15 @@ class Popup:
     sliders: list[PopupSlider] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class Question:
+    """A yes-or-no question shown over the viewport. Yes (or Enter) runs the action; No (or Esc) does nothing."""
+
+    title: str
+    message: str
+    action: str
+    payload: object = None
+
+
 def hit(bounds: Rect, x: float, y: float) -> bool:
     return bounds[0] <= x <= bounds[0] + bounds[2] and bounds[1] <= y <= bounds[1] + bounds[3]

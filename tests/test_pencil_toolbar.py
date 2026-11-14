@@ -49,6 +49,10 @@ class PencilToolbarTests(unittest.TestCase):
         # The 3D Printer's and 3D Extruder's own tests cover them; stopping a session only shuts them down.
         setattr(tools, "printer", MagicMock())
         setattr(tools, "extruder", MagicMock())
+        # The sketch's lines live in the scene; here the count is set by each test.
+        self.sketch_mesh: MagicMock = MagicMock()
+        self.sketch_mesh.count.return_value = 0
+        setattr(tools, "sketch_mesh", self.sketch_mesh)
         self.tools_module: ModuleType = tools
         viewport: ModuleType = ModuleType("_toolbar.viewport")
         self.viewport_module: ModuleType = viewport
@@ -307,6 +311,142 @@ class PencilToolbarTests(unittest.TestCase):
         self.assertEqual(len(self.strokes), 3)
         self.bpy.data.objects.new.assert_not_called()
         self.bpy.data.objects.remove.assert_not_called()
+
+    def test_ctrl_g_command_makes_the_new_group_active_and_shows_it_in_clayers(self) -> None:
+        controller: ModuleType = self.load_controller()
+        overlay: MagicMock = MagicMock()
+        setattr(self.imports["_toolbar.ui"], "overlay", overlay)
+        layers: MagicMock = getattr(self.tools_module, "layers")
+        layers.create_sibling_group.return_value = "collection:Group.001"
+        layers.create_group.return_value = "collection:Group.002"
+        undo: MagicMock
+        with patch.dict(sys.modules, self.imports), patch.object(controller, "_undo_push") as undo:
+            controller.dispatch("layer", ("sibling", ""))
+            layers.create_sibling_group.assert_called_once_with(self.bpy.context)
+            layers.create_group.assert_not_called()
+            self.assertEqual(self.state.status, "New active group: Group.001")
+            overlay.reveal_layer.assert_called_once_with("collection:Group.001")
+            undo.assert_called_once_with("Change drawing layer")
+            # The + button's group, at the top level, is shown the same way.
+            controller.dispatch("layer", ("add", ""))
+            layers.create_group.assert_called_once_with(self.bpy.context)
+            overlay.reveal_layer.assert_called_with("collection:Group.002")
+            self.assertEqual(undo.call_count, 2)
+
+    def test_a_group_made_beside_the_active_one_shares_its_parent(self) -> None:
+        class Children(list["Collection"]):
+            def __contains__(self, name: object) -> bool:
+                return any(item.name == name for item in self)
+
+            def link(self, item: Collection) -> None:
+                self.append(item)
+
+        class Collection(dict[str, object]):
+            def __init__(self, name: str) -> None:
+                super().__init__()
+                self.name: str = name
+                self.children: Children = Children()
+                self.objects: Children = Children()
+
+        class Collections(list[Collection]):
+            def get(self, name: str) -> Collection | None:
+                return next((item for item in self if item.name == name), None)
+
+            def new(self, name: str) -> Collection:
+                # Blender numbers a repeated name: Group, Group.001, Group.002.
+                taken: int = sum(1 for item in self if item.name == name or item.name[len(name) + 1 :].isdigit())
+                created: Collection = Collection(name if not taken else f"{name}.{taken:03d}")
+                self.append(created)
+                return created
+
+        self.load_controller()
+        layer_module: ModuleType = self.stroke_scene()
+        collections: Collections = Collections()
+        self.bpy.data.collections = collections
+        root: Collection = Collection("Scene Collection")
+        context: SimpleNamespace = SimpleNamespace(scene=SimpleNamespace(collection=root), selected_objects=[])
+        default: Collection = collections.new("Default Drawing")
+        default[layer_module.GROUP] = True
+        root.children.link(default)
+        self.state.active_group = "Default Drawing"
+        # Beside a top-level group: at the top level.
+        first: str = layer_module.create_sibling_group(context)
+        self.assertEqual((first, self.state.active_group), ("collection:Group", "Group"))
+        group: Collection | None = collections.get("Group")
+        assert group is not None
+        self.assertIn("Group", root.children)
+        self.assertTrue(group[layer_module.GROUP])
+        self.assertTrue(group.children[0][layer_module.STROKES])
+        # Beside a group inside another: inside that same group, not at the top level.
+        layer_module.create_group(context, "Inner", "collection:Group")
+        self.assertEqual(self.state.active_group, "Inner")
+        second: str = layer_module.create_sibling_group(context)
+        self.assertEqual((second, self.state.active_group), ("collection:Group.001", "Group.001"))
+        self.assertIn("Group.001", group.children)
+        self.assertIn("Inner", group.children)
+        self.assertNotIn("Group.001", root.children)
+        # Pressed again, the next one stays at this level too.
+        third: str = layer_module.create_sibling_group(context)
+        self.assertEqual(third, "collection:Group.002")
+        self.assertIn("Group.002", group.children)
+        # An active group that no longer exists falls back to the top level.
+        self.state.active_group = "Gone"
+        fourth: str = layer_module.create_sibling_group(context)
+        self.assertIn(fourth.removeprefix("collection:"), root.children)
+
+    def test_clayers_scrolls_to_a_new_group_and_opens_the_groups_that_hold_it(self) -> None:
+        self.load_controller()
+        layer_module: ModuleType = self.stroke_scene()
+        ui: ModuleType = self.imports["_toolbar.ui"]
+        setattr(ui, "paint", MagicMock())
+        ui.paint.measure.return_value = 0.0
+        setattr(ui, "menus", MagicMock())
+        setattr(self.blender_module, "gpu", MagicMock())
+        rows: list[LayerRow] = [layer_module.LayerRow("ground", "Ground Plane", "Plane", 0, True, False, False)]
+        index: int
+        for index in range(30):
+            rows.append(layer_module.LayerRow(f"collection:G{index}", f"G{index}", "Group", 0, True, False, False))
+        rows.append(layer_module.LayerRow("collection:Outer", "Outer", "Group", 0, True, False, False))
+        rows.append(layer_module.LayerRow("collection:Middle", "Middle", "Group", 1, True, False, False))
+        rows.append(layer_module.LayerRow("collection:New", "New", "Group", 2, True, False, True))
+        with patch.dict(sys.modules, self.imports), patch.object(layer_module, "layer_rows", return_value=rows):
+            overlay: ModuleType = module("_toolbar.ui.overlay", "app/drawing_app/ui/overlay.py")
+
+            def shown() -> dict[str, float]:
+                """Each drawn row's key and height in a 300 x 900 panel."""
+                overlay._CURRENT.clear()
+                overlay._layers(self.bpy.context, 300, 900)
+                found: dict[str, float] = {}
+                widget: Widget
+                for widget in overlay._CURRENT:
+                    if widget.key.startswith("layer_select_"):
+                        found[widget.key.removeprefix("layer_select_")] = widget.bounds[1]
+                return found
+
+            overlay._COLLAPSED.update(("collection:Outer", "collection:Middle", "collection:G3"))
+            before: dict[str, float] = shown()
+            self.assertIn("ground", before)
+            self.assertNotIn("collection:New", before)
+            overlay.reveal_layer("collection:New")
+            after: dict[str, float] = shown()
+            # The groups above it opened, others stayed closed, and it is the lowest row in view.
+            self.assertEqual(overlay._COLLAPSED, {"collection:G3"})
+            self.assertIn("collection:New", after)
+            self.assertIn("collection:Middle", after)
+            self.assertNotIn("ground", after)
+            self.assertEqual(after["collection:New"], min(after.values()))
+            # Asked once: scrolling away afterwards is not undone by the next redraw.
+            overlay._SCROLL["layers"] = 0.0
+            self.assertNotIn("collection:New", shown())
+            # A row above the view is brought down to its top; one already in view does not move the list.
+            overlay._SCROLL["layers"] = 600.0
+            overlay.reveal_layer("collection:G2")
+            again: dict[str, float] = shown()
+            self.assertEqual(again["collection:G2"], max(again.values()))
+            scroll: float = overlay._SCROLL["layers"]
+            overlay.reveal_layer("collection:G4")
+            shown()
+            self.assertEqual(overlay._SCROLL["layers"], scroll)
 
     def test_clayers_take_a_third_and_the_chat_divider_resizes_and_saves(self) -> None:
         self.load_controller()
@@ -1143,7 +1283,7 @@ class PencilToolbarTests(unittest.TestCase):
         state.restore_brushes({"pipe": {"color": [0.1, 0.2, 0.3]}})
         self.assertEqual(self.state.brushes["pipe"].color, (0.1, 0.2, 0.3))
 
-    def toolbox_widgets(self, tool: Tool, width: float) -> dict[str, Widget]:
+    def toolbox_widgets(self, tool: Tool, width: float, sketching: bool = False) -> dict[str, Widget]:
         """Draw the Tool Box with text measured at 7.5 px per character (13 px font)."""
 
         def measure(label: str, size: float = 13.0) -> float:
@@ -1158,6 +1298,8 @@ class PencilToolbarTests(unittest.TestCase):
         setattr(self.blender_module, "gpu", MagicMock())
         self.bpy.context.scene.unit_settings.scale_length = 1.0
         self.state.tool = tool
+        # A sketch is open with its own tool, or with another one while its brush is down.
+        self.state.sketching = tool == "sketch" or sketching
         widgets: dict[str, Widget] = {}
         with patch.dict(sys.modules, self.imports):
             overlay: ModuleType = module("_toolbar.ui.overlay", "app/drawing_app/ui/overlay.py")
@@ -1173,11 +1315,12 @@ class PencilToolbarTests(unittest.TestCase):
         widgets: dict[str, Widget] = self.toolbox_widgets("select", 220)
         self.assertIn("toolbox_hex", widgets)
         tool: Tool
-        for tool in ("paint", "pipe", "printer", "extruder"):
+        for tool in ("paint", "pipe", "printer", "extruder", "sketch"):
             widgets = self.toolbox_widgets(tool, 220)
             self.assertNotIn("toolbox_hex", widgets, tool)
             self.assertIn(f"tool_{tool}_hex", widgets, tool)
-            self.assertEqual(widgets[f"tool_{tool}_hex"].prefix, ("tool",))
+            # Sketch Mesh names its own colour, which it also shows while its brush is down.
+            self.assertEqual(widgets[f"tool_{tool}_hex"].prefix, ("sketch",) if tool == "sketch" else ("tool",))
 
     def test_printer_settings_send_nozzle_flow_and_drop(self) -> None:
         widgets: dict[str, Widget] = self.toolbox_widgets("select", 220)
@@ -1272,6 +1415,375 @@ class PencilToolbarTests(unittest.TestCase):
         ):
             state.load_preferences()
         self.assertEqual((self.state.extruder.flow, self.state.extruder.drop), (0.01, 0.5))
+
+    def test_sketch_mesh_settings_offer_open_closed_curved_straight_and_detail(self) -> None:
+        widgets: dict[str, Widget] = self.toolbox_widgets("select", 220)
+        self.assertEqual((widgets["tool_sketch"].action, widgets["tool_sketch"].payload), ("tool", "sketch"))
+        self.assertEqual(widgets["tool_sketch"].tooltip, "Sketch Mesh")
+        widgets = self.toolbox_widgets("sketch", 220)
+        line: Widget = widgets["slider_radius"]
+        # The sketch's own brush, whichever tool is active while the brush is down.
+        self.assertEqual((line.action, line.prefix, line.tooltip), ("sketch", ("radius",), "Line Size (m)"))
+        self.assertEqual((line.minimum, line.maximum, line.value), (0.001, 0.2, 0.01))
+        key: str
+        payload: tuple[str, bool]
+        for key, payload in (
+            ("sketch_open", ("closed", False)),
+            ("sketch_closed", ("closed", True)),
+            ("sketch_curved", ("curved", True)),
+            ("sketch_straight", ("curved", False)),
+        ):
+            self.assertEqual((widgets[key].action, widgets[key].payload), ("sketch", payload), key)
+        # The two buttons of a row share its width.
+        self.assertAlmostEqual(widgets["sketch_open"].bounds[2] * 2 + 4, 200.0)
+        self.assertGreater(widgets["sketch_closed"].bounds[0], widgets["sketch_open"].bounds[0])
+        detail: Widget = widgets["slider_detail"]
+        self.assertEqual((detail.action, detail.prefix), ("sketch", ("detail",)))
+        self.assertEqual((detail.minimum, detail.maximum, detail.value, detail.scale), (8.0, 64.0, 24.0, 1.0))
+        self.assertEqual(widgets["axes_spokes"].payload, ("axes_spokes", True))
+        self.assertEqual(widgets["tool_sketch_hex"].prefix, ("sketch",))
+        self.assertEqual(cast("tuple[object, ...]", widgets["tool_color_preset_0"].payload)[0], "sketch")
+        # Lines are round and of one width: no brush shape, no pressure toggle, no hardness or opacity.
+        for key in ("brush_shape", "pressure_radius", "slider_hardness", "slider_opacity"):
+            self.assertNotIn(key, widgets)
+        # The check and cross wait for the first line.
+        self.assertNotIn("sketch_confirm", widgets)
+        self.assertNotIn("sketch_cancel", widgets)
+        self.sketch_mesh.count.return_value = 3
+        widgets = self.toolbox_widgets("sketch", 220)
+        self.assertEqual((widgets["sketch_confirm"].action, widgets["sketch_confirm"].payload), ("sketch", "confirm"))
+        # The cross leaves the sketch, which asks first.
+        self.assertEqual((widgets["sketch_cancel"].action, widgets["sketch_cancel"].payload), ("sketch", "leave"))
+        self.assertIn("Enter", widgets["sketch_confirm"].tooltip)
+        self.assertIn("asks first", widgets["sketch_cancel"].tooltip)
+        icons: list[str] = [call.args[0] for call in self.paint.icon.call_args_list]
+        self.assertIn("check", icons)
+        self.assertIn("cancel", icons)
+        labels: list[str] = [call.args[0] for call in self.paint.text.call_args_list]
+        self.assertIn("Sketch: 3 lines", labels)
+
+    def test_an_open_sketch_keeps_its_panel_while_the_brush_is_down(self) -> None:
+        widgets: dict[str, Widget] = self.toolbox_widgets("sketch", 220)
+        # Brush up: the tool's icon leaves the sketch, and the brush button puts the brush down.
+        self.assertEqual((widgets["tool_sketch"].action, widgets["tool_sketch"].payload), ("sketch", "leave"))
+        self.assertEqual(
+            (widgets["sketch_brush"].action, widgets["sketch_brush"].payload), ("sketch", ("brush", False))
+        )
+        self.assertEqual((widgets["tool_move"].action, widgets["tool_move"].payload), ("tool", "move"))
+        self.assertEqual(widgets["tool_rotate"].payload, "rotate")
+        self.assertEqual(widgets["tool_scale"].payload, "scale")
+        self.assertIn("Esc puts the brush down.", [call.args[0] for call in self.paint.text.call_args_list])
+        # The brush and the three move tools sit in one row under the icon.
+        self.assertEqual(widgets["sketch_brush"].bounds[1], widgets["tool_scale"].bounds[1])
+        self.assertLess(widgets["sketch_brush"].bounds[1], widgets["tool_sketch"].bounds[1])
+        # Brush down, with Select: the same panel, not the tool chooser; the brush button picks it up again.
+        self.state.sketching = True
+        widgets = self.toolbox_widgets("select", 220, sketching=True)
+        self.assertEqual(widgets["sketch_brush"].payload, ("brush", True))
+        key: str
+        for key in (
+            "tool_sketch",
+            "sketch_open",
+            "sketch_straight",
+            "slider_detail",
+            "slider_radius",
+            "tool_sketch_hex",
+        ):
+            self.assertIn(key, widgets, key)
+        for key in ("tool_paint", "tool_pipe", "tool_grease", "toolbox_hex"):
+            self.assertNotIn(key, widgets, key)
+        self.assertIn("Brush is down: move your planes,", [call.args[0] for call in self.paint.text.call_args_list])
+        # Brush down, with Move: the selected object's fields above the sketch's settings; Move again is Select.
+        with patch.object(self.pencil, "editing", return_value=False):
+            widgets = self.toolbox_widgets("move", 220, sketching=True)
+        self.assertEqual(widgets["tool_move"].payload, "select")
+        self.assertIn("transform_location_0", widgets)
+        self.assertIn("sketch_open", widgets)
+        self.assertGreater(widgets["transform_location_0"].bounds[1], widgets["slider_radius"].bounds[1])
+        # A narrow Tool Box wraps the row instead of cutting it off.
+        widgets = self.toolbox_widgets("sketch", 110)
+        self.assertLess(widgets["tool_scale"].bounds[1], widgets["sketch_brush"].bounds[1])
+        self.assertLess(widgets["slider_radius"].bounds[1], widgets["tool_scale"].bounds[1])
+
+    def test_sketch_mesh_commands_are_bounded_and_record_one_undo_step(self) -> None:
+        controller: ModuleType = self.load_controller()
+        overlay: MagicMock = MagicMock()
+        setattr(self.imports["_toolbar.ui"], "overlay", overlay)
+        undo: MagicMock
+        with (
+            patch.dict(sys.modules, self.imports),
+            patch.object(controller, "_undo_push") as undo,
+            patch.object(self.pencil, "leave"),
+        ):
+            controller.dispatch("sketch", ("closed", True))
+            controller.dispatch("sketch", ("curved", False))
+            controller.dispatch("sketch", ("detail", 500))
+            self.assertEqual((self.state.sketch.closed, self.state.sketch.curved), (True, False))
+            self.assertEqual(self.state.sketch.detail, 64)
+            controller.dispatch("sketch", ("detail", 11.6))
+            self.assertEqual(self.state.sketch.detail, 12)
+            self.assertIsInstance(self.state.sketch.detail, int)
+            controller.dispatch("sketch", ("detail", float("nan")))
+            controller.dispatch("sketch", ("detail", True))
+            controller.dispatch("sketch", ("closed", "yes"))
+            controller.dispatch("sketch", ("smooth", True))
+            controller.dispatch("sketch", "explode")
+            self.assertEqual((self.state.sketch.closed, self.state.sketch.detail), (True, 12))
+            self.assertFalse(hasattr(self.state.sketch, "smooth"))
+            # The line size is the sketch's own, whatever tool is active.
+            self.state.tool = "select"
+            controller.dispatch("sketch", ("radius", 5.0))
+            controller.dispatch("sketch", ("radius", float("inf")))
+            self.assertEqual((self.state.brushes["sketch"].radius, self.state.brushes["paint"].radius), (0.2, 0.02))
+            undo.assert_not_called()
+            # A mesh that was built is one undo step; a sketch that could not make one records nothing.
+            controller.dispatch("sketch", "confirm")
+            undo.assert_called_once_with("Sketch Mesh")
+            self.sketch_mesh.confirm.return_value = None
+            controller.dispatch("sketch", "confirm")
+            undo.assert_called_once()
+
+    def test_the_brush_goes_down_and_up_without_closing_the_sketch(self) -> None:
+        controller: ModuleType = self.load_controller()
+        overlay: MagicMock = MagicMock()
+        setattr(self.imports["_toolbar.ui"], "overlay", overlay)
+        undo: MagicMock
+        with (
+            patch.dict(sys.modules, self.imports),
+            patch.object(controller, "_undo_push") as undo,
+            patch.object(self.pencil, "leave"),
+        ):
+            controller.dispatch("tool", "sketch")
+            self.assertEqual((self.state.tool, self.state.sketching), ("sketch", True))
+            self.assertIn("Esc puts the brush down", self.state.status)
+            controller.dispatch("sketch", ("brush", False))
+            self.assertEqual((self.state.tool, self.state.sketching), ("select", True))
+            self.assertIn("brush down", self.state.status)
+            # Moving things with the brush down keeps the sketch open.
+            tool: str
+            for tool in ("move", "rotate", "scale", "select"):
+                controller.dispatch("tool", tool)
+                self.assertEqual((self.state.tool, self.state.sketching), (tool, True))
+            controller.dispatch("sketch", ("brush", "toggle"))
+            self.assertEqual((self.state.tool, self.state.sketching), ("sketch", True))
+            controller.dispatch("sketch", ("brush", "toggle"))
+            self.assertEqual((self.state.tool, self.state.sketching), ("select", True))
+            controller.dispatch("sketch", ("brush", True))
+            controller.dispatch("sketch", ("brush", True))
+            controller.dispatch("sketch", ("brush", "up"))
+            self.assertEqual((self.state.tool, self.state.sketching), ("sketch", True))
+            self.sketch_mesh.cancel.assert_not_called()
+            # Leaving a sketch that has lines asks first, and changes nothing by itself.
+            self.sketch_mesh.lines.return_value = [MagicMock()]
+            controller.dispatch("sketch", "leave")
+            overlay.ask.assert_called_once()
+            self.assertEqual(overlay.ask.call_args.args[0], "Do you want to cancel?")
+            self.assertIn("will be removed", overlay.ask.call_args.args[1])
+            self.assertEqual(overlay.ask.call_args.args[2:], ("sketch", "cancel"))
+            self.assertEqual((self.state.tool, self.state.sketching), ("sketch", True))
+            self.sketch_mesh.cancel.assert_not_called()
+            # Yes: the lines go, the sketch closes, and it is one undo step.
+            controller.dispatch("sketch", "cancel")
+            self.sketch_mesh.cancel.assert_called_once()
+            self.assertEqual((self.state.tool, self.state.sketching), ("select", False))
+            self.assertEqual(self.state.status, "Sketch cancelled")
+            undo.assert_called_once_with("Cancel sketch")
+            # A sketch without lines closes without asking, and there is nothing to undo.
+            controller.dispatch("tool", "sketch")
+            self.sketch_mesh.lines.return_value = []
+            self.sketch_mesh.cancel.return_value = False
+            controller.dispatch("sketch", "leave")
+            overlay.ask.assert_called_once()
+            self.assertEqual((self.state.tool, self.state.sketching), ("select", False))
+            undo.assert_called_once()
+            # Another drawing tool closes the sketch; the saved preferences never hold an open one.
+            controller.dispatch("tool", "sketch")
+            controller.dispatch("tool", "pipe")
+            self.assertEqual((self.state.tool, self.state.sketching), ("pipe", False))
+        self.state.sketching = True
+        written: MagicMock
+        with (
+            patch.object(self.state_module.Path, "write_text") as written,
+            patch.object(self.state_module.Path, "mkdir"),
+            patch.object(self.state_module.Path, "replace"),
+            patch.object(self.state_module.Path, "unlink"),
+        ):
+            self.state_module.save_preferences()
+        self.assertFalse(json.loads(written.call_args.args[0])["sketching"])
+
+    def test_sketch_mesh_settings_load_within_bounds_and_lines_stay_round(self) -> None:
+        state: ModuleType = self.state_module
+        saved: dict[str, object] = {
+            "sketch": {"closed": True, "curved": False, "detail": 500},
+            "brushes": {"sketch": {"radius": 0.05, "shape": "square"}, "pipe": {"shape": "square"}},
+            "sketching": True,
+        }
+        with (
+            patch.object(state.Path, "is_file", return_value=True),
+            patch.object(state.Path, "read_text", return_value=json.dumps(saved)),
+        ):
+            state.load_preferences()
+        self.assertEqual(
+            (self.state.sketch.closed, self.state.sketch.curved, self.state.sketch.detail), (True, False, 64)
+        )
+        self.assertEqual((self.state.brushes["sketch"].radius, self.state.brushes["sketch"].shape), (0.05, "circle"))
+        self.assertEqual(self.state.brushes["pipe"].shape, "square")
+        self.assertFalse(self.state.sketching)
+        state.restore_sketch({"closed": "yes", "detail": float("inf")})
+        state.restore_sketch(None)
+        self.assertEqual((self.state.sketch.closed, self.state.sketch.detail), (True, 64))
+
+    def test_escape_puts_the_brush_down_then_asks_before_cancelling_the_sketch(self) -> None:
+        controller: ModuleType = self.load_controller()
+        session: MagicMock = MagicMock()
+        session.closed = False
+        session.drawing.is_drawing = False
+        session.navigation.active = False
+        escape: SimpleNamespace = SimpleNamespace(type="ESC", value="PRESS", mouse_x=10, mouse_y=10)
+        overlay: MagicMock = MagicMock()
+        overlay.is_capturing.return_value = False
+        setattr(self.imports["_toolbar.ui"], "overlay", overlay)
+        dispatched: MagicMock
+        with patch.dict(sys.modules, self.imports), patch.object(controller, "dispatch") as dispatched:
+            # Brush up: Esc only puts it down.
+            self.state.tool, self.state.sketching = "sketch", True
+            result: set[str] = controller.DRAWING_OT_session.modal(session, self.bpy.context, escape)
+            self.assertEqual(result, {"RUNNING_MODAL"})
+            dispatched.assert_called_once_with("sketch", ("brush", False))
+            # Brush down, with Select or a move tool: Esc leaves the sketch, which asks when it has lines.
+            tool: Tool
+            for tool in ("select", "move", "rotate", "scale"):
+                self.state.tool = tool
+                controller.DRAWING_OT_session.modal(session, self.bpy.context, escape)
+                dispatched.assert_called_with("sketch", "leave")
+            # Without a sketch, Esc returns to the Select tool as before.
+            self.state.tool, self.state.sketching = "pipe", False
+            controller.DRAWING_OT_session.modal(session, self.bpy.context, escape)
+            dispatched.assert_called_with("tool", "select")
+            self.assertEqual(dispatched.call_count, 6)
+
+    def test_grease_pencil_follows_the_3d_cursors_plane_when_an_axis_view_turns_it(self) -> None:
+        controller: ModuleType = self.load_controller()
+        guides: ModuleType = ModuleType("_toolbar.viewport.guides")
+        setattr(guides, "update_clipping", MagicMock())
+        self.imports[guides.__name__] = guides
+        setattr(self.imports["_toolbar.ui"], "overlay", MagicMock())
+        session: MagicMock = MagicMock()
+        session.closed = False
+        session.previous_tick = 0.0
+        session.previous_panel_tick = math.inf
+        session.navigation.active = False
+        session.cursor_axis = 1
+        timer: SimpleNamespace = SimpleNamespace(type="TIMER", value="NOTHING", mouse_x=0, mouse_y=0)
+        self.state.tool = "grease"
+        self.state.cursor_active = self.state.cursor_placed = True
+        self.state.cursor_axis = 1
+        refresh: MagicMock
+
+        def tick() -> None:
+            session.previous_tick = 0.0
+            self.assertEqual(controller.DRAWING_OT_session.modal(session, self.bpy.context, timer), {"PASS_THROUGH"})
+
+        with (
+            patch.dict(sys.modules, self.imports),
+            patch.object(self.pencil, "sync_shelf"),
+            patch.object(self.pencil, "refresh") as refresh,
+        ):
+            tick()
+            refresh.assert_not_called()
+            # Pressing 1 turned the plane to X: Draw mode is given it once.
+            self.state.cursor_axis = 0
+            tick()
+            tick()
+            refresh.assert_called_once()
+            self.assertEqual(session.cursor_axis, 0)
+            # While the view is still being turned, it waits.
+            self.state.cursor_axis = 2
+            session.navigation.active = True
+            tick()
+            refresh.assert_called_once()
+            session.navigation.active = False
+            tick()
+            self.assertEqual(refresh.call_count, 2)
+            # Without a placed cursor the plane is not in use, and other tools read it when they draw.
+            self.state.cursor_placed = False
+            self.state.cursor_axis = 1
+            tick()
+            self.state.cursor_placed = True
+            self.state.tool = "pipe"
+            self.state.cursor_axis = 0
+            tick()
+            self.assertEqual((refresh.call_count, session.cursor_axis), (2, 0))
+
+    def test_a_question_holds_input_until_enter_escape_or_a_button_answers_it(self) -> None:
+        self.toolbox_widgets("select", 220)
+        overlay: ModuleType = self.overlay
+        layout: MagicMock = self.imports["_toolbar.ui"].layout
+        layout.role.return_value = "viewport"
+        self.paint.wrap.return_value = [(0, 23), (24, 35)]
+        dispatched: MagicMock = MagicMock()
+        setattr(overlay, "_DISPATCH", dispatched)
+        region: SimpleNamespace = SimpleNamespace(type="WINDOW", x=100, y=50)
+        area: SimpleNamespace = SimpleNamespace(as_pointer=lambda: 77, regions=[region])
+        context: SimpleNamespace = SimpleNamespace(
+            preferences=SimpleNamespace(system=SimpleNamespace(ui_scale=1.0)),
+            window=SimpleNamespace(screen=SimpleNamespace(areas=[area])),
+        )
+
+        def event(kind: str, value: str = "PRESS", x: float = 0.0, y: float = 0.0) -> SimpleNamespace:
+            return SimpleNamespace(type=kind, value=value, mouse_x=x, mouse_y=y, shift=False, ctrl=False)
+
+        def show() -> dict[str, Widget]:
+            """Ask, and draw the question in a 600 x 400 viewport."""
+            overlay.ask("Do you want to cancel?", "The lines you drew will be removed.", "sketch", "cancel")
+            overlay._CURRENT.clear()
+            overlay._question(600.0, 400.0)
+            overlay._WIDGETS[77] = list(overlay._CURRENT)
+            return {widget.key: widget for widget in overlay._CURRENT}
+
+        def middle(widget: Widget) -> tuple[float, float]:
+            return (100 + widget.bounds[0] + widget.bounds[2] / 2, 50 + widget.bounds[1] + widget.bounds[3] / 2)
+
+        buttons: dict[str, Widget] = show()
+        self.assertTrue(overlay.is_capturing())
+        self.assertEqual((buttons["question_yes"].payload, buttons["question_no"].payload), (True, False))
+        self.assertGreater(buttons["question_no"].bounds[0], buttons["question_yes"].bounds[0])
+        texts: list[str] = [call.args[0] for call in self.paint.text.call_args_list]
+        self.assertIn("Do you want to cancel?", texts)
+        self.assertIn("The lines you drew will", texts)
+        # Other keys and clicks elsewhere are held back and answer nothing.
+        self.assertTrue(overlay.handle_event(context, event("A")))
+        self.assertTrue(overlay.handle_event(context, event("LEFTMOUSE", x=105.0, y=55.0)))
+        self.assertTrue(overlay.handle_event(context, event("RIGHTMOUSE")))
+        self.assertTrue(overlay.handle_event(context, event("MOUSEMOVE", "NOTHING", 300.0, 200.0)))
+        self.assertTrue(overlay.is_capturing())
+        dispatched.assert_not_called()
+        # Enter is yes.
+        self.assertTrue(overlay.handle_event(context, event("RET")))
+        dispatched.assert_called_once_with("sketch", "cancel")
+        self.assertFalse(overlay.is_capturing())
+        # Esc is no.
+        show()
+        self.assertTrue(overlay.handle_event(context, event("ESC")))
+        self.assertFalse(overlay.is_capturing())
+        dispatched.assert_called_once()
+        # The buttons answer too.
+        buttons = show()
+        self.assertTrue(overlay.handle_event(context, event("LEFTMOUSE", "PRESS", *middle(buttons["question_no"]))))
+        self.assertFalse(overlay.is_capturing())
+        dispatched.assert_called_once()
+        buttons = show()
+        self.assertTrue(overlay.handle_event(context, event("LEFTMOUSE", "PRESS", *middle(buttons["question_yes"]))))
+        self.assertEqual(dispatched.call_count, 2)
+        self.assertFalse(overlay.is_capturing())
+        # Numpad Enter also says yes, and losing the window says no.
+        show()
+        self.assertTrue(overlay.handle_event(context, event("NUMPAD_ENTER")))
+        self.assertEqual(dispatched.call_count, 3)
+        show()
+        overlay.cancel_capture()
+        self.assertFalse(overlay.is_capturing())
+        self.assertEqual(dispatched.call_count, 3)
 
     def test_log_sliders_space_values_by_ratio(self) -> None:
         self.toolbox_widgets("printer", 220)

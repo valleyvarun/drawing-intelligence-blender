@@ -13,7 +13,9 @@
 | `tools/canvas.py` | View rays, plane/object/cursor intersections, grid snapping, and axis constraints. |
 | `tools/geometry.py` | Pressure samples, resampling, pipe meshes, and sparse paint fields. |
 | `tools/surface.py` | Cached native BVH queries and non-overlapping paint patches clipped to source triangles. |
-| `tools/drawing.py` | Paint/pipe gestures, mesh data, material alpha, cursor placement, commit/cancel, and native undo; it also starts and aims 3D Printer pours and 3D Extruder tubes. |
+| `tools/drawing.py` | Paint/pipe gestures, mesh data, material alpha, cursor placement, commit/cancel, and native undo; it also starts and aims 3D Printer pours and 3D Extruder tubes, and draws Sketch Mesh lines as marked round pipes. |
+| `tools/sketch_mesh.py` | Sketch Mesh in the scene: the sketch is whatever marked lines the scene holds (so it survives undo, redo, and saving), building the mesh object from them, removing them, and the panels' line count. An open sketch is `AppState.sketching`; its brush is up while the tool is `sketch` and down while it is Select, Move, Rotate, or Scale (`controller.set_tool`). |
+| `tools/sketch_surface.py` | The surface in numpy, without Blender: line clean-up (loops, corners, resampling), lofts across ribs, the patch over the lines' best plane with its outline rules, the thin-plate spline, solids and inflated outlines, and shells around cages. Only the triangulation of points in a plane is handed in: Blender's constrained Delaunay triangulation. |
 | `tools/printer.py` | 3D Printer: particles released above the canvas point, falling and landing on a timer, floors found by casting down, the print object's mesh rebuilt as it forms, and one undo step once it settles. |
 | `tools/extruder.py` | 3D Extruder: the tube laid on a timer while the button is held, the nozzle's height (risen out of any solid the canvas point is inside), floors found by casting down, the strand that falls after release, and one undo step per tube. |
 | `tools/extrusion.py` | The tube in pure Python and numpy: points laid at the flow's speed, coiling when the nozzle is slower, resting on floors or the tube's own earlier passes, the hanging strand, and the mesh with rounded ends. |
@@ -33,7 +35,7 @@
 | `viewport/touch.py` | Windows touch input bridge; pen events remain native Blender input. |
 | `viewport/guides.py` | Native Workbench configuration, ruler depth passes, labels, outlines, and orientation drawing. |
 | `ui/layout.py` | Three real, resizable editor areas, prepared in stages as Blender initializes them. |
-| `ui/overlay.py`, `paint.py`, `menus.py` | Tool/layer/object controls, field editing, menus, icon drawing, and input capture. |
+| `ui/overlay.py`, `paint.py`, `menus.py` | Tool/layer/object controls, field editing, menus, icon drawing, input capture, and yes-or-no questions over the viewport (`overlay.ask`). |
 | `ui/widgets.py` | Widget, edit, and popup records shared by the overlay and the panels it draws. |
 | `ui/chat.py` | Claude Code chat panel below Clayers: transcript layout, approval cards, the message box, the mode/model/effort menus, and the account menu. Input and the Clayers/chat divider are routed by `overlay.py`. |
 | `ui/scripting.py` | Windows > Scripting: a window with Blender's text editor and Python console, and the example script. |

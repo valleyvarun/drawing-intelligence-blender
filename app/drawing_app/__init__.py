@@ -228,7 +228,7 @@ def _identity_tick() -> float | None:
 def _history_post(_scene: Any) -> None:
     from .core.controller import redraw
     from .core.project import restore_scene
-    from .tools import extruder, printer
+    from .tools import extruder, printer, sketch_mesh
     from .tools.layers import ensure_scene
     from .tools.pipe_fill import cancel
     from .ui import overlay
@@ -237,6 +237,8 @@ def _history_post(_scene: Any) -> None:
     # Undo restored the prints' meshes and fields; a print still forming, or a tube being laid, is dropped.
     printer.reset()
     extruder.reset()
+    # Undo may have brought a sketch's lines back, or taken them away.
+    sketch_mesh.reset()
     restore_scene()
     ensure_scene()
     overlay.invalidate_images()
